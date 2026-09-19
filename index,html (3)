@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+	<title>Smart Parking System</title>
+
+	<link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+<header class="header">
+
+	<div>
+		<h1>🚗 Smart Parking</h1>
+		<p>Parking Management Dashboard</p>
+	</div>
+
+	<button id="themeButton" class="theme-btn">
+		🌙 Dark Mode
+	</button>
+
+</header>
+
+
+<main class="container">
+
+	<!-- Dashboard -->
+
+	<section class="dashboard">
+
+		<div class="stat total">
+			<span class="icon">🅿️</span>
+			<div>
+				<p>Total Slots</p>
+				<h2 id="totalSlots">40</h2>
+			</div>
+		</div>
+
+		<div class="stat available">
+			<span class="icon">🟢</span>
+			<div>
+				<p>Available</p>
+				<h2 id="availableSlots">0</h2>
+			</div>
+		</div>
+
+		<div class="stat occupied">
+			<span class="icon">🔴</span>
+			<div>
+				<p>Occupied</p>
+				<h2 id="occupiedSlots">0</h2>
+			</div>
+		</div>
+
+		<div class="stat reserved">
+			<span class="icon">🟡</span>
+			<div>
+				<p>Reserved</p>
+				<h2 id="reservedSlots">0</h2>
+			</div>
+		</div>
+
+	</section>
+
+
+	<!-- Occupancy -->
+
+	<section class="occupancy-card">
+
+		<div class="occupancy-header">
+			<h2>Parking Occupancy</h2>
+			<strong id="occupancyPercentage">0%</strong>
+		</div>
+
+		<div class="progress">
+			<div id="progressBar"></div>
+		</div>
+
+	</section>
+
+
+	<!-- Search and Filter -->
+
+	<section class="controls">
+
+		<input
+			type="text"
+			id="searchInput"
+			placeholder="🔎 Search parking slot..."
+		>
+
+		<select id="filterSelect">
+
+			<option value="all">All Slots</option>
+			<option value="empty">Empty</option>
+			<option value="occupied">Occupied</option>
+			<option value="reserved">Reserved</option>
+
+		</select>
+
+		<button id="resetButton" class="reset">
+			Reset Parking
+		</button>
+
+	</section>
+
+
+	<!-- Parking -->
+
+	<section class="parking-section">
+
+		<h2>Parking Area</h2>
+
+		<div id="parkingGrid" class="parking-grid"></div>
+
+	</section>
+
+
+	<!-- Legend -->
+
+	<section class="legend">
+
+		<span>
+			<i class="green"></i>
+			Empty
+		</span>
+
+		<span>
+			<i class="red"></i>
+			Occupied
+		</span>
+
+		<span>
+			<i class="yellow"></i>
+			Reserved
+		</span>
+
+	</section>
+
+</main>
+
+
+<!-- Parking Modal -->
+
+<div id="parkingModal" class="modal">
+
+	<div class="modal-content">
+
+		<button class="close" onclick="closeModal()">×</button>
+
+		<h2 id="modalTitle">Parking Slot</h2>
+
+		<p id="modalStatus"></p>
+
+		<div id="vehicleSection">
+
+			<label>Vehicle Number</label>
+
+			<input
+				type="text"
+				id="vehicleNumber"
+				placeholder="Example: TN01AB1234"
+			>
+
+		</div>
+
+		<label>Parking Hours</label>
+
+		<input
+			type="number"
+			id="parkingHours"
+			value="1"
+			min="1"
+			max="24"
+		>
+
+		<div class="price">
+
+			Estimated Fee:
+			₹<span id="estimatedFee">30</span>
+
+		</div>
+
+		<div class="modal-buttons">
+
+			<button id="occupyButton" class="btn red-btn">
+				Occupy
+			</button>
+
+			<button id="reserveButton" class="btn yellow-btn">
+				Reserve
+			</button>
+
+			<button id="emptyButton" class="btn green-btn">
+				Make Empty
+			</button>
+
+		</div>
+
+	</div>
+
+</div>
+
+
+<script src="script.js"></script>
+
+<!-- Code injected by live-server -->
+<script>
+	// <![CDATA[  <-- For SVG support
+	if ('WebSocket' in window) {
+		(function () {
+			function refreshCSS() {
+				var sheets = [].slice.call(document.getElementsByTagName("link"));
+				var head = document.getElementsByTagName("head")[0];
+				for (var i = 0; i < sheets.length; ++i) {
+					var elem = sheets[i];
+					var parent = elem.parentElement || head;
+					parent.removeChild(elem);
+					var rel = elem.rel;
+					if (elem.href && typeof rel != "string" || rel.length == 0 || rel.toLowerCase() == "stylesheet") {
+						var url = elem.href.replace(/(&|\?)_cacheOverride=\d+/, '');
+						elem.href = url + (url.indexOf('?') >= 0 ? '&' : '?') + '_cacheOverride=' + (new Date().valueOf());
+					}
+					parent.appendChild(elem);
+				}
+			}
+			var protocol = window.location.protocol === 'http:' ? 'ws://' : 'wss://';
+			var address = protocol + window.location.host + window.location.pathname + '/ws';
+			var socket = new WebSocket(address);
+			socket.onmessage = function (msg) {
+				if (msg.data == 'reload') window.location.reload();
+				else if (msg.data == 'refreshcss') refreshCSS();
+			};
+			if (sessionStorage && !sessionStorage.getItem('IsThisFirstTime_Log_From_LiveServer')) {
+				console.log('Live reload enabled.');
+				sessionStorage.setItem('IsThisFirstTime_Log_From_LiveServer', true);
+			}
+		})();
+	}
+	else {
+		console.error('Upgrade your browser. This Browser is NOT supported WebSocket for Live-Reloading.');
+	}
+	// ]]>
+</script>
+</body>
+</html>
