@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Manage SkillSwap users, skills, and requests.">
+    <title>Administration | SkillSwap</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <style>
+        .admin-analytics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; }
+        .admin-analytics-grid article { padding: 1rem; border: 1px solid #e5e7eb; border-radius: .75rem; }
+        .admin-analytics-grid h3 { margin-top: 0; }
+        .admin-analytics-grid progress { max-width: 45%; vertical-align: middle; }
+        .admin-analytics-grid p { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+    </style>
+</head>
+<body>
+    <header class="site-header">
+        <nav class="navbar shell" aria-label="Main navigation">
+            <a class="brand" href="{{ url_for('home') }}" aria-label="SkillSwap home">
+                <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+                <span>Skill<span class="brand-accent">Swap</span></span>
+            </a>
+            <div class="profile-header-links">
+                <span class="admin-header-label">Administrator</span>
+                <a class="nav-link" href="{{ url_for('dashboard') }}">Dashboard</a>
+            </div>
+        </nav>
+    </header>
+
+    <main class="admin-page shell">
+        <div class="admin-page-heading">
+            <div><p class="eyebrow">SkillSwap management</p><h1>Administration</h1><p>Review platform activity and manage the people and skills in your community.</p></div>
+            <span class="admin-access-badge"><span></span>Admin access</span>
+        </div>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="form-flashes" aria-live="polite">
+                    {% for category, message in messages %}
+                        <p class="flash-message flash-{{ category }}" role="{{ 'alert' if category == 'error' else 'status' }}">{{ message }}</p>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+
+        <section class="admin-stats" aria-label="Platform statistics">
+            <article><span aria-hidden="true">◉</span><p>Total users</p><strong>{{ total_users }}</strong></article>
+            <article><span aria-hidden="true">●</span><p>Active users</p><strong>{{ active_users }}</strong></article>
+            <article><span aria-hidden="true">✳</span><p>Total skills</p><strong>{{ total_skills }}</strong></article>
+            <article><span aria-hidden="true">↗</span><p>Total requests</p><strong>{{ total_requests }}</strong></article>
+            <article><span aria-hidden="true">…</span><p>Pending requests</p><strong>{{ pending_requests }}</strong></article>
+            <article><span aria-hidden="true">✓</span><p>Completed sessions</p><strong>{{ completed_sessions }}</strong></article>
+            <article><span aria-hidden="true">···</span><p>Total messages</p><strong>{{ total_messages }}</strong></article>
+            <article><span aria-hidden="true">★</span><p>Ratings</p><strong>{{ total_ratings }}</strong></article>
+            <article><span aria-hidden="true">★</span><p>Platform average</p><strong>{{ average_platform_rating if average_platform_rating is not none else '—' }}</strong></article>
+            <article><span aria-hidden="true">!</span><p>Unresolved reports</p><strong>{{ unresolved_reports }}</strong></article>
+        </section>
+
+        <section class="admin-section" id="users" aria-labelledby="admin-users-title">
+            <div class="admin-section-heading"><div><p class="eyebrow">People in the community</p><h2 id="admin-users-title">Users <span>{{ users|length }}</span></h2></div></div>
+            <form method="get" action="{{ url_for('admin_panel') }}" class="admin-add-skill">
+                <label for="admin-user-search"><span>Search name or email</span><input id="admin-user-search" name="user_search" type="search" value="{{ user_search }}" maxlength="255"></label>
+                <label for="admin-user-status"><span>Account status</span><select id="admin-user-status" name="user_status"><option value="all"{% if user_status == 'all' %} selected{% endif %}>All accounts</option><option value="active"{% if user_status == 'active' %} selected{% endif %}>Active</option><option value="inactive"{% if user_status == 'inactive' %} selected{% endif %}>Inactive</option></select></label>
+                <button class="button button-dark" type="submit">Filter users</button>
+            </form>
+            <div class="admin-table-scroll">
+                <table class="admin-table">
+                    <thead><tr><th scope="col">Account</th><th scope="col">Role</th><th scope="col">Status</th><th scope="col">Joined</th><th scope="col">Actions</th></tr></thead>
+                    <tbody>
+                        {% for user in users %}
+                            <tr>
+                                <td><div class="admin-user-cell"><span class="admin-user-avatar" aria-hidden="true">{{ user.name[:1]|upper }}</span><span><strong><a href="{{ url_for('user_profile', user_id=user.id) }}">{{ user.name }}</a></strong><small>@{{ user.username }} · {{ user.email }}</small></span></div></td>
+                                <td>{% if user.is_admin %}<span class="admin-role-badge">Admin</span>{% else %}<span class="admin-muted">Member</span>{% endif %}</td>
+                                <td><span class="admin-status{% if not user.is_active %} status-disabled{% endif %}"><span></span>{{ 'Active' if user.is_active else 'Disabled' }}</span></td>
+                                <td>{{ user.created_at.strftime('%b %d, %Y') }}</td>
+                                <td>
+                                    <div class="admin-row-actions">
+                                        {% if user.id != current_user.id %}
+                                            <form method="post" action="{{ url_for('admin_toggle_user', user_id=user.id) }}"><button class="admin-action-button" type="submit">{{ 'Enable' if not user.is_active else 'Disable' }}</button></form>
+                                            <form method="post" action="{{ url_for('admin_delete_user', user_id=user.id) }}"><button class="admin-action-button admin-delete-action" type="submit">Delete</button></form>
+                                        {% else %}
+                                            <span class="admin-muted">Current admin</span>
+                                        {% endif %}
+                                    </div>
+                                </td>
+                            </tr>
+                        {% else %}
+                            <tr><td colspan="5"><p class="admin-empty">No users to show.</p></td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="admin-section" id="skills" aria-labelledby="admin-skills-title">
+            <div class="admin-section-heading"><div><p class="eyebrow">Keep the catalog useful</p><h2 id="admin-skills-title">Skills <span>{{ skills|length }}</span></h2></div></div>
+            <form method="get" action="{{ url_for('admin_panel') }}#skills" class="admin-add-skill">
+                <label for="admin-skill-filter"><span>Filter by category</span><select id="admin-skill-filter" name="skill_category"><option value="">All categories</option>{% for category in skill_categories %}<option value="{{ category }}"{% if skill_category == category %} selected{% endif %}>{{ category }}</option>{% endfor %}</select></label>
+                <button class="button button-dark" type="submit">Filter skills</button>
+            </form>
+            <form class="admin-add-skill" method="post" action="{{ url_for('admin_add_skill') }}">
+                <label for="admin-skill-name"><span>Skill name</span><input id="admin-skill-name" name="name" type="text" maxlength="120" required></label>
+                <label for="admin-skill-category"><span>Category</span><select id="admin-skill-category" name="category" required><option value="">Choose category</option>{% for category in skill_categories %}<option value="{{ category }}">{{ category }}</option>{% endfor %}</select></label>
+                <label class="admin-description-field" for="admin-skill-description"><span>Description <small>Optional</small></span><input id="admin-skill-description" name="description" type="text" maxlength="2000"></label>
+                <button class="button button-dark" type="submit">Add skill <span aria-hidden="true">＋</span></button>
+            </form>
+            <div class="admin-skills-list">
+                {% for skill in skills %}
+                    <article class="admin-skill-row">
+                        <span class="admin-skill-mark" aria-hidden="true">{{ skill.name[:1]|upper }}</span>
+                        <div class="admin-skill-info"><strong>{{ skill.name }}</strong><span>{{ skill.category or 'Uncategorized' }} · {{ 'Active' if skill.is_active else 'Inactive' }} · {{ skill_usage[skill.id].members }} users · {{ skill_usage[skill.id].requests }} requests</span></div>
+                        <details class="admin-skill-edit">
+                            <summary>Edit</summary>
+                            <form method="post" action="{{ url_for('admin_edit_skill', skill_id=skill.id) }}">
+                                <label for="skill-name-{{ skill.id }}"><span>Name</span><input id="skill-name-{{ skill.id }}" name="name" type="text" maxlength="120" value="{{ skill.name }}" required></label>
+                                <label for="skill-category-{{ skill.id }}"><span>Category</span><select id="skill-category-{{ skill.id }}" name="category" required>{% for category in skill_categories %}<option value="{{ category }}"{% if skill.category == category %} selected{% endif %}>{{ category }}</option>{% endfor %}</select></label>
+                                <label for="skill-description-{{ skill.id }}"><span>Description</span><input id="skill-description-{{ skill.id }}" name="description" type="text" maxlength="2000" value="{{ skill.description or '' }}"></label>
+                                <button class="button button-dark" type="submit">Save changes</button>
+                            </form>
+                        </details>
+                        <form method="post" action="{{ url_for('admin_toggle_skill', skill_id=skill.id) }}"><button class="admin-action-button" type="submit">{{ 'Deactivate' if skill.is_active else 'Reactivate' }}</button></form>
+                        <form method="post" action="{{ url_for('admin_delete_skill', skill_id=skill.id) }}"><button class="admin-action-button admin-delete-action" type="submit">Delete</button></form>
+                    </article>
+                {% else %}
+                    <p class="admin-empty">The skill catalog is empty.</p>
+                {% endfor %}
+            </div>
+        </section>
+
+        <section class="admin-section" id="requests" aria-labelledby="admin-requests-title">
+            <div class="admin-section-heading"><div><p class="eyebrow">Recent community activity</p><h2 id="admin-requests-title">Skill requests <span>{{ skill_requests|length }}</span></h2><p>Pending {{ pending_requests }} · Accepted {{ accepted_requests }} · Rejected {{ rejected_requests }} · Cancelled {{ cancelled_requests }}</p></div></div>
+            <div class="admin-table-scroll">
+                <table class="admin-table admin-request-table">
+                    <thead><tr><th scope="col">Skill</th><th scope="col">From</th><th scope="col">To</th><th scope="col">Status</th><th scope="col">Date</th></tr></thead>
+                    <tbody>
+                        {% for skill_request in skill_requests %}
+                            <tr><td><strong>{{ skill_request.skill.name }}</strong><small class="admin-cell-subtitle">{{ skill_request.skill.category or 'Other' }}</small></td><td>{{ skill_request.sender.username }}</td><td>{{ skill_request.receiver.username }}</td><td><span class="request-status status-{{ skill_request.status|lower }}">{{ skill_request.status|title }}</span>{% if skill_request.message %}<details><summary>Request details</summary>{{ skill_request.message }}</details>{% endif %}</td><td>{{ skill_request.created_at.strftime('%b %d, %Y') }}</td></tr>
+                        {% else %}
+                            <tr><td colspan="5"><p class="admin-empty">No skill requests to show.</p></td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="admin-section" id="sessions" aria-labelledby="admin-sessions-title">
+            <div class="admin-section-heading"><div><p class="eyebrow">Learning activity</p><h2 id="admin-sessions-title">Sessions <span>{{ sessions|length }}</span></h2><p>Scheduled {{ scheduled_sessions }} · In progress {{ in_progress_sessions }} · Completed {{ completed_sessions }} · Cancelled {{ cancelled_sessions }}</p></div></div>
+            <div class="admin-table-scroll">
+                <table class="admin-table"><thead><tr><th>Session</th><th>Skill</th><th>Teacher</th><th>Learner</th><th>Date</th><th>Status</th></tr></thead><tbody>
+                    {% for session in sessions %}
+                        <tr><td>{{ session.title }}{% if session.notes %}<details><summary>Session notes</summary>{{ session.notes }}</details>{% endif %}</td><td>{{ session.skill.name }}</td><td>{{ session.teacher.username }}</td><td>{{ session.learner.username }}</td><td>{{ session.date.strftime('%b %d, %Y') }}</td><td>{{ session.status|replace('_', ' ')|title }}</td></tr>
+                    {% else %}<tr><td colspan="6"><p class="admin-empty">No sessions to show.</p></td></tr>{% endfor %}
+                </tbody></table>
+            </div>
+        </section>
+
+        <section class="admin-section" id="reports" aria-labelledby="admin-reports-title">
+            <div class="admin-section-heading"><div><p class="eyebrow">Safety and moderation</p><h2 id="admin-reports-title">Reports <span>{{ reports|length }}</span></h2></div></div>
+            <form method="get" action="{{ url_for('admin_panel') }}#reports" class="admin-add-skill">
+                <label for="admin-report-status"><span>Filter by status</span><select id="admin-report-status" name="report_status"><option value="all"{% if report_status == 'all' %} selected{% endif %}>All reports</option>{% for status in ['submitted', 'under_review', 'resolved', 'rejected'] %}<option value="{{ status }}"{% if report_status == status %} selected{% endif %}>{{ status|replace('_', ' ')|title }}</option>{% endfor %}</select></label>
+                <button class="button button-dark" type="submit">Filter reports</button>
+            </form>
+            <div class="admin-table-scroll">
+                <table class="admin-table"><thead><tr><th>Reporter</th><th>Reported user</th><th>Reason</th><th>Description</th><th>Status</th><th>Review</th></tr></thead><tbody>
+                    {% for report in reports %}
+                        <tr><td>{{ report.reporter.username }}</td><td>{{ report.reported_user.username }}</td><td>{{ report.reason|replace('_', ' ')|title }}</td><td>{{ report.description }}</td><td>{{ report.status|replace('_', ' ')|title }}{% if report.moderation_notes %}<small class="admin-cell-subtitle">Notes: {{ report.moderation_notes }}</small>{% endif %}</td><td>
+                            <form method="post" action="{{ url_for('admin_review_report', report_id=report.id) }}">
+                                <select name="status" aria-label="Report status"><option value="under_review"{% if report.status == 'under_review' %} selected{% endif %}>Under review</option><option value="resolved"{% if report.status == 'resolved' %} selected{% endif %}>Resolved</option><option value="rejected"{% if report.status == 'rejected' %} selected{% endif %}>Rejected</option></select>
+                                <input name="moderation_notes" type="text" maxlength="2000" value="{{ report.moderation_notes or '' }}" aria-label="Moderation notes" placeholder="Moderation notes">
+                                <button class="admin-action-button" type="submit">Save review</button>
+                            </form>
+                        </td></tr>
+                    {% else %}<tr><td colspan="6"><p class="admin-empty">No reports to review.</p></td></tr>{% endfor %}
+                </tbody></table>
+            </div>
+        </section>
+
+        <section class="admin-section" id="analytics" aria-labelledby="admin-analytics-title">
+            <div class="admin-section-heading"><div><p class="eyebrow">Platform activity</p><h2 id="admin-analytics-title">Analytics</h2></div></div>
+            <div class="admin-analytics-grid">
+                <article><h3>User registrations by month</h3>{% for point in analytics.user_registrations %}<p>{{ point.month }} <progress max="{{ [analytics.user_registrations|map(attribute='count')|max, 1]|max }}" value="{{ point.count }}"></progress> {{ point.count }}</p>{% endfor %}</article>
+                <article><h3>Swap requests by month</h3>{% for point in analytics.monthly_swap_requests %}<p>{{ point.month }} <progress max="{{ [analytics.monthly_swap_requests|map(attribute='count')|max, 1]|max }}" value="{{ point.count }}"></progress> {{ point.count }}</p>{% endfor %}</article>
+                <article><h3>Sessions by status</h3>{% for status, count in analytics.session_statuses.items() %}<p>{{ status|replace('_', ' ')|title }} <strong>{{ count }}</strong></p>{% endfor %}</article>
+                <article><h3>Popular skills</h3>{% for skill in analytics.popular_skills %}<p>{{ skill.name }} <strong>{{ skill.usage_count }}</strong></p>{% else %}<p>No skill usage recorded.</p>{% endfor %}</article>
+                <article><h3>Rating distribution</h3>{% for stars, count in analytics.rating_distribution.items() %}<p>{{ stars }} star{{ '' if stars == '1' else 's' }} <strong>{{ count }}</strong></p>{% endfor %}</article>
+            </div>
+        </section>
+
+        <section class="admin-section" id="activity" aria-labelledby="admin-activity-title">
+            <div class="admin-section-heading"><div><p class="eyebrow">Audit trail</p><h2 id="admin-activity-title">Recent admin actions</h2></div></div>
+            <div class="admin-table-scroll"><table class="admin-table"><thead><tr><th>Admin</th><th>Action</th><th>Entity</th><th>Details</th><th>Time</th></tr></thead><tbody>
+                {% for log in activity_logs %}<tr><td>{{ log.admin.username if log.admin else 'Removed admin' }}</td><td>{{ log.action }}</td><td>{{ log.entity_type }}{% if log.entity_id %} #{{ log.entity_id }}{% endif %}</td><td>{{ log.details or '' }}</td><td>{{ log.created_at.strftime('%b %d, %Y %H:%M') }}</td></tr>
+                {% else %}<tr><td colspan="5"><p class="admin-empty">No admin actions recorded.</p></td></tr>{% endfor %}
+            </tbody></table></div>
+        </section>
+    </main>
+    <script src="{{ url_for('static', filename='js/script.js') }}" defer></script>
+</body>
+</html>

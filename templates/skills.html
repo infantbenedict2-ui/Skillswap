@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Manage the skills you can teach and want to learn on SkillSwap.">
+    <title>My Skills | SkillSwap</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header class="site-header">
+        <nav class="navbar shell" aria-label="Main navigation">
+            <a class="brand" href="{{ url_for('home') }}" aria-label="SkillSwap home">
+                <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+                <span>Skill<span class="brand-accent">Swap</span></span>
+            </a>
+            <div class="profile-header-links">
+                <a class="nav-link" href="{{ url_for('dashboard') }}">Dashboard</a>
+                <a class="button button-small button-outline" href="{{ url_for('my_profile') }}">My profile</a>
+            </div>
+        </nav>
+    </header>
+
+    <main class="skills-page shell">
+        <div class="skills-page-heading">
+            <div><p class="eyebrow">Your knowledge exchange</p><h1>My Skills</h1><p>Choose what you can share and what you’re ready to learn.</p></div>
+            <a class="skills-back-link" href="{{ url_for('dashboard') }}">← Back to dashboard</a>
+        </div>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="form-flashes" aria-live="polite">
+                    {% for category, message in messages %}
+                        <p class="flash-message flash-{{ category }}" role="{{ 'alert' if category == 'error' else 'status' }}">{{ message }}</p>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+
+        <section class="skills-add-panel" aria-labelledby="add-skill-title">
+            <div class="skills-add-copy"><span class="skills-add-icon" aria-hidden="true">＋</span><div><p class="eyebrow">Keep growing</p><h2 id="add-skill-title">Add a skill</h2><p>One skill can be both something you teach and something you want to learn.</p></div></div>
+            <form class="skills-add-form" method="post" action="{{ url_for('manage_skills') }}">
+                <input type="hidden" name="action" value="add">
+                <label class="form-field" for="skill-id"><span>Choose a skill</span>
+                    <select id="skill-id" name="skill_id" required>
+                        <option value="">Select from the catalog</option>
+                        {% for category, category_skills in skills_by_category.items() %}
+                            <optgroup label="{{ category }}">
+                                {% for skill in category_skills %}<option value="{{ skill.id }}">{{ skill.name }}</option>{% endfor %}
+                            </optgroup>
+                        {% endfor %}
+                    </select>
+                </label>
+                <fieldset class="skill-intent-field">
+                    <legend>Add it to</legend>
+                    <div class="skill-intent-options">
+                        <label><input type="radio" name="skill_type" value="teach" checked><span aria-hidden="true">↗</span>I can teach</label>
+                        <label><input type="radio" name="skill_type" value="learn"><span aria-hidden="true">＋</span>I want to learn</label>
+                    </div>
+                </fieldset>
+                <div class="field-grid">
+                    <label class="form-field" for="teaching-experience"><span>Teaching experience <small>Optional</small></span>
+                        <select id="teaching-experience" name="experience_level">
+                            <option value="">Not specified</option>
+                            <option value="beginner">Beginner</option>
+                            <option value="intermediate">Intermediate</option>
+                            <option value="advanced">Advanced</option>
+                        </select>
+                    </label>
+                    <label class="form-field" for="teaching-availability"><span>Availability <small>Optional</small></span>
+                        <select id="teaching-availability" name="availability">
+                            <option value="">Not specified</option>
+                            <option value="weekdays">Weekdays</option>
+                            <option value="weekends">Weekends</option>
+                            <option value="evenings">Evenings</option>
+                            <option value="flexible">Flexible</option>
+                        </select>
+                    </label>
+                </div>
+                <button class="button button-dark skills-add-button" type="submit">Add skill <span aria-hidden="true">↗</span></button>
+            </form>
+        </section>
+
+        <div class="managed-skills-grid">
+            <section class="managed-skills-panel" aria-labelledby="teach-skills-title">
+                <div class="managed-skills-heading"><div><p class="eyebrow">Share what you know</p><h2 id="teach-skills-title">I can teach <span>{{ skills_to_teach|length }}</span></h2></div><span class="managed-skills-symbol teach-symbol" aria-hidden="true">↗</span></div>
+                {% if skills_to_teach %}
+                    <div class="managed-skill-list">
+                        {% for user_skill in skills_to_teach %}
+                            <article class="managed-skill-card">
+                                <span class="managed-skill-icon category-{{ (user_skill.skill.category or 'other')|lower|replace(' ', '-') }}" aria-hidden="true">{{ user_skill.skill.name[:1]|upper }}</span>
+                                <div class="managed-skill-info"><strong>{{ user_skill.skill.name }}</strong><span>{{ user_skill.skill.category or 'Other' }}{% if user_skill.experience_level %} · {{ user_skill.experience_level|capitalize }}{% endif %}{% if user_skill.availability %} · {{ user_skill.availability|capitalize }}{% endif %}</span></div>
+                                <form class="managed-skill-details" method="post" action="{{ url_for('manage_skills') }}">
+                                    <input type="hidden" name="action" value="update">
+                                    <input type="hidden" name="user_skill_id" value="{{ user_skill.id }}">
+                                    <label class="sr-only" for="experience-{{ user_skill.id }}">Experience for {{ user_skill.skill.name }}</label>
+                                    <select id="experience-{{ user_skill.id }}" name="experience_level" aria-label="Teaching experience for {{ user_skill.skill.name }}">
+                                        <option value=""{% if not user_skill.experience_level %} selected{% endif %}>Experience not specified</option>
+                                        <option value="beginner"{% if user_skill.experience_level == 'beginner' %} selected{% endif %}>Beginner</option>
+                                        <option value="intermediate"{% if user_skill.experience_level == 'intermediate' %} selected{% endif %}>Intermediate</option>
+                                        <option value="advanced"{% if user_skill.experience_level == 'advanced' %} selected{% endif %}>Advanced</option>
+                                    </select>
+                                    <label class="sr-only" for="availability-{{ user_skill.id }}">Availability for {{ user_skill.skill.name }}</label>
+                                    <select id="availability-{{ user_skill.id }}" name="availability" aria-label="Availability for {{ user_skill.skill.name }}">
+                                        <option value=""{% if not user_skill.availability %} selected{% endif %}>Availability not specified</option>
+                                        <option value="weekdays"{% if user_skill.availability == 'weekdays' %} selected{% endif %}>Weekdays</option>
+                                        <option value="weekends"{% if user_skill.availability == 'weekends' %} selected{% endif %}>Weekends</option>
+                                        <option value="evenings"{% if user_skill.availability == 'evenings' %} selected{% endif %}>Evenings</option>
+                                        <option value="flexible"{% if user_skill.availability == 'flexible' %} selected{% endif %}>Flexible</option>
+                                    </select>
+                                    <button class="remove-skill-button" type="submit">Save details</button>
+                                </form>
+                                <form method="post" action="{{ url_for('manage_skills') }}">
+                                    <input type="hidden" name="action" value="remove">
+                                    <input type="hidden" name="user_skill_id" value="{{ user_skill.id }}">
+                                    <button class="remove-skill-button" type="submit" aria-label="Remove {{ user_skill.skill.name }} from skills I can teach">Remove</button>
+                                </form>
+                            </article>
+                        {% endfor %}
+                    </div>
+                {% else %}
+                    <p class="skills-empty-state">Your teaching skills will appear here. Add one from the catalog above.</p>
+                {% endif %}
+            </section>
+
+            <section class="managed-skills-panel" aria-labelledby="learn-skills-title">
+                <div class="managed-skills-heading"><div><p class="eyebrow">Stay curious</p><h2 id="learn-skills-title">I want to learn <span>{{ skills_to_learn|length }}</span></h2></div><span class="managed-skills-symbol learn-symbol" aria-hidden="true">＋</span></div>
+                {% if skills_to_learn %}
+                    <div class="managed-skill-list">
+                        {% for user_skill in skills_to_learn %}
+                            <article class="managed-skill-card">
+                                <span class="managed-skill-icon category-{{ (user_skill.skill.category or 'other')|lower|replace(' ', '-') }}" aria-hidden="true">{{ user_skill.skill.name[:1]|upper }}</span>
+                                <div class="managed-skill-info"><strong>{{ user_skill.skill.name }}</strong><span>{{ user_skill.skill.category or 'Other' }}</span></div>
+                                <form method="post" action="{{ url_for('manage_skills') }}">
+                                    <input type="hidden" name="action" value="remove">
+                                    <input type="hidden" name="user_skill_id" value="{{ user_skill.id }}">
+                                    <button class="remove-skill-button" type="submit" aria-label="Remove {{ user_skill.skill.name }} from skills I want to learn">Remove</button>
+                                </form>
+                            </article>
+                        {% endfor %}
+                    </div>
+                {% else %}
+                    <p class="skills-empty-state">Add a skill you’re curious about to find people who can teach it.</p>
+                {% endif %}
+            </section>
+        </div>
+    </main>
+</body>
+</html>

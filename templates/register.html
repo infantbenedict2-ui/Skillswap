@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Create your SkillSwap account and start sharing skills.">
+    <title>Join SkillSwap</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header class="site-header">
+        <nav class="navbar shell" aria-label="Main navigation">
+            <a class="brand" href="{{ url_for('home') }}" aria-label="SkillSwap home">
+                <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+                <span>Skill<span class="brand-accent">Swap</span></span>
+            </a>
+            <button class="menu-toggle" type="button" aria-label="Open navigation" aria-expanded="false" aria-controls="nav-links">
+                <span></span><span></span>
+            </button>
+            <div class="nav-links" id="nav-links">
+                <a class="nav-link" href="{{ url_for('home') }}">Home</a>
+                <a class="nav-link" href="{{ url_for('home') }}#skills">Find Skills</a>
+                <a class="nav-link" href="{{ url_for('home') }}#how-it-works">How It Works</a>
+                <a class="nav-link login-link" href="{{ url_for('login') }}">Login</a>
+                <a class="button button-small button-dark nav-register" href="{{ url_for('register') }}" aria-current="page">Register <span aria-hidden="true">↗</span></a>
+            </div>
+        </nav>
+    </header>
+
+    <main class="auth-main">
+        <div class="auth-layout shell">
+            <aside class="auth-story">
+                <p class="auth-kicker"><span></span> A community of shared skills</p>
+                <h1>What you know<br>can take someone<br><em>somewhere new.</em></h1>
+                <p>Make room for a new skill. Meet people who are ready to share what they know, just like you.</p>
+                <div class="auth-story-note"><span aria-hidden="true">⇄</span><span>Give a little knowledge.<br>Get a new perspective.</span></div>
+                <span class="auth-story-orbit orbit-one" aria-hidden="true">✳</span>
+                <span class="auth-story-orbit orbit-two" aria-hidden="true">＋</span>
+            </aside>
+
+            <section class="auth-form-panel" aria-labelledby="register-title">
+                <div class="auth-form-heading">
+                    <p class="eyebrow">Your next chapter starts here</p>
+                    <h2 id="register-title">Create your account</h2>
+                    <p>Set up your profile and find your first skill swap.</p>
+                </div>
+
+                {% with messages = get_flashed_messages(with_categories=true) %}
+                    {% if messages %}
+                        <div class="form-flashes" aria-live="polite">
+                            {% for category, message in messages %}
+                                <p class="flash-message flash-{{ category }}" role="{{ 'alert' if category == 'error' else 'status' }}">{{ message }}</p>
+                            {% endfor %}
+                        </div>
+                    {% endif %}
+                {% endwith %}
+
+                <form class="register-form" method="post" action="{{ url_for('register') }}">
+                    <div class="field-grid">
+                        <label class="form-field" for="name">
+                            <span>Full name <b aria-hidden="true">*</b></span>
+                            <input id="name" name="name" type="text" value="{{ request.form.get('name', '') }}" autocomplete="name" maxlength="120" required>
+                        </label>
+                        <label class="form-field" for="username">
+                            <span>Username <b aria-hidden="true">*</b></span>
+                            <input id="username" name="username" type="text" value="{{ request.form.get('username', '') }}" autocomplete="username" maxlength="80" required>
+                        </label>
+                        <label class="form-field field-wide" for="email">
+                            <span>Email address <b aria-hidden="true">*</b></span>
+                            <input id="email" name="email" type="email" value="{{ request.form.get('email', '') }}" autocomplete="email" maxlength="255" required>
+                        </label>
+                        <label class="form-field" for="password">
+                            <span>Password <b aria-hidden="true">*</b></span>
+                            <input id="password" name="password" type="password" autocomplete="new-password" required>
+                        </label>
+                        <label class="form-field" for="confirm-password">
+                            <span>Confirm password <b aria-hidden="true">*</b></span>
+                            <input id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" required>
+                        </label>
+                        <label class="form-field field-wide" for="location">
+                            <span>Location <small>Optional</small></span>
+                            <input id="location" name="location" type="text" value="{{ request.form.get('location', '') }}" autocomplete="address-level2" maxlength="120" placeholder="City or campus">
+                        </label>
+                        <label class="form-field field-wide" for="bio">
+                            <span>Bio <small>Optional</small></span>
+                            <textarea id="bio" name="bio" rows="3" maxlength="1000" placeholder="A little about what you enjoy learning or teaching">{{ request.form.get('bio', '') }}</textarea>
+                        </label>
+                    </div>
+                    <p class="form-note"><span aria-hidden="true">*</span> Required fields</p>
+                    <button class="button button-dark register-submit" type="submit">Create account <span aria-hidden="true">↗</span></button>
+                </form>
+                <p class="auth-switch">Already part of SkillSwap? <a href="{{ url_for('login') }}">Log in <span aria-hidden="true">→</span></a></p>
+            </section>
+        </div>
+    </main>
+
+    <footer class="auth-footer shell"><a href="{{ url_for('home') }}">← Back to SkillSwap</a><span>Learn from each other. Grow together.</span></footer>
+    <script src="{{ url_for('static', filename='js/script.js') }}" defer></script>
+</body>
+</html>

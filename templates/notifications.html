@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Your personal SkillSwap notifications.">
+    <title>Notifications | SkillSwap</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header class="site-header">
+        <nav class="navbar shell" aria-label="Main navigation">
+            <a class="brand" href="{{ url_for('home') }}" aria-label="SkillSwap home">
+                <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+                <span>Skill<span class="brand-accent">Swap</span></span>
+            </a>
+            <div class="profile-header-links">
+                <a class="nav-link" href="{{ url_for('dashboard') }}">Dashboard</a>
+                <a class="button button-small button-outline" href="{{ url_for('messages') }}">Messages</a>
+            </div>
+        </nav>
+    </header>
+
+    <main class="notifications-page shell">
+        <div class="notifications-page-heading">
+            <div><p class="eyebrow">Updates from your community</p><h1>Notifications</h1><p>Stay in the loop with your SkillSwap activity.</p></div>
+            <a class="notifications-back-link" href="{{ url_for('dashboard') }}">← Back to dashboard</a>
+        </div>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="form-flashes" aria-live="polite">
+                    {% for category, message in messages %}
+                        <p class="flash-message flash-{{ category }}" role="{{ 'alert' if category == 'error' else 'status' }}">{{ message }}</p>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+
+        <section class="notifications-panel" aria-label="Your notifications">
+            <div class="notifications-toolbar">
+                <span>{% if unread_count %}{{ unread_count }} unread{% else %}All caught up{% endif %}</span>
+                <div class="profile-header-links">
+                    <a class="nav-link" href="{{ url_for('view_notifications', filter='all') }}">All</a>
+                    <a class="nav-link" href="{{ url_for('view_notifications', filter='unread') }}">Unread</a>
+                    {% if unread_count %}<form method="post" action="{{ url_for('mark_all_notifications_read') }}"><button class="notifications-mark-all" type="submit">Mark all as read <span aria-hidden="true">✓</span></button></form>{% endif %}
+                </div>
+            </div>
+            {% if notifications %}
+                <div class="notification-list">
+                    {% for notification in notifications %}
+                        <article class="notification-card{% if not notification.is_read %} notification-unread{% endif %}">
+                            <span class="notification-type-mark notification-type-{{ notification.type|lower|replace('_', '-') }}" aria-hidden="true">{% if notification.type in ['message', 'chat_message'] %}···{% elif notification.type in ['review', 'rating', 'rating_received'] %}★{% elif notification.type in ['skill_request', 'request_cancelled'] %}↗{% else %}✓{% endif %}</span>
+                            <div class="notification-copy">
+                                <div class="notification-title-row"><a href="{{ notification_href(notification) }}">{{ notification.title or notification.type|replace('_', ' ')|title }}</a>{% if not notification.is_read %}<span class="notification-new">New</span>{% endif %}</div>
+                                <p>{{ notification.message }}</p>
+                                <span class="notification-type-label">{{ notification.type|replace('_', ' ')|title }}</span>
+                                <time datetime="{{ notification.created_at.isoformat() }}">{{ notification.created_at.strftime('%b %d, %Y · %I:%M %p') }}</time>
+                            </div>
+                            <div class="profile-header-links">
+                                {% if not notification.is_read %}<form method="post" action="{{ url_for('mark_notification_read', notification_id=notification.id) }}"><button class="notification-mark-read" type="submit">Mark read</button></form>{% endif %}
+                                <form method="post" action="{{ url_for('delete_notification_page', notification_id=notification.id) }}"><button class="notification-mark-read" type="submit">Delete</button></form>
+                            </div>
+                        </article>
+                    {% endfor %}
+                </div>
+            {% else %}
+                <div class="notifications-empty"><span aria-hidden="true">♧</span><h2>You’re all caught up</h2><p>New skill requests, messages, and reviews will show up here.</p></div>
+            {% endif %}
+        </section>
+    </main>
+</body>
+</html>

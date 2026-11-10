@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="View and manage members you blocked on SkillSwap.">
+    <title>Blocked users | SkillSwap</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header class="site-header"><nav class="navbar shell" aria-label="Main navigation"><a class="brand" href="{{ url_for('home') }}"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>Skill<span class="brand-accent">Swap</span></span></a><div class="profile-header-links"><a class="nav-link" href="{{ url_for('dashboard') }}">Dashboard</a><a class="nav-link" href="{{ url_for('privacy_page') }}">Privacy</a></div></nav></header>
+    <main class="app-page shell" data-blocked-users>
+        <header class="app-page-heading"><div><p class="eyebrow">Manage your connections</p><h1>Blocked users</h1><p>Blocked members cannot message you or appear in your matching results.</p></div></header>
+        <div class="app-feedback" data-feedback role="status" aria-live="polite"></div>
+        <section class="app-panel"><div class="app-panel-heading"><div><p class="eyebrow">Your list</p><h2>Blocked members</h2></div></div><div class="blocked-list" data-blocked-list aria-live="polite"><p class="app-loading">Loading your block list…</p></div></section>
+    </main>
+    <script src="{{ url_for('static', filename='js/script.js') }}" defer></script>
+</body>
+</html>

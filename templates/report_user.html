@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Report a SkillSwap account to the administrators.">
+    <title>Report member | SkillSwap</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header class="site-header"><nav class="navbar shell" aria-label="Main navigation"><a class="brand" href="{{ url_for('home') }}"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>Skill<span class="brand-accent">Swap</span></span></a><a class="nav-link" href="{{ url_for('user_profile', user_id=reported_user.id) }}">Back to profile</a></nav></header>
+    <main class="app-page app-page-narrow shell">
+        <header class="app-page-heading"><div><p class="eyebrow">Community safety</p><h1>Report {{ reported_user.name }}</h1><p>Reports are shared with administrators for review. Please include factual details.</p></div></header>
+        <div class="app-feedback" data-feedback role="status" aria-live="polite"></div>
+        <form class="app-panel report-form" data-report-form data-endpoint="{{ url_for('submit_report') }}" data-reported-user="{{ reported_user.id }}">
+            <label for="report-reason"><span>Reason</span><select id="report-reason" name="reason" required><option value="">Choose a reason</option><option value="inappropriate_behaviour">Inappropriate behaviour</option><option value="spam">Spam</option><option value="fake_profile">Fake profile</option><option value="harassment">Harassment</option><option value="other">Other</option></select></label>
+            <label for="report-description"><span>What happened?</span><textarea id="report-description" name="description" rows="6" minlength="1" maxlength="2000" required placeholder="Describe the behaviour you’re reporting."></textarea></label>
+            <button class="button button-dark" type="submit">Submit report</button>
+            <p class="privacy-help">Submitting a report does not automatically block this member. You can manage blocks from your privacy settings.</p>
+        </form>
+    </main>
+    <script src="{{ url_for('static', filename='js/script.js') }}" defer></script>
+</body>
+</html>

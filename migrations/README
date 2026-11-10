@@ -1,0 +1,11 @@
+SkillSwap database migrations
+
+See the root README.md section "Database migrations and administrator setup"
+for new-database setup, existing-database adoption, backup requirements, and
+safe operational commands.
+
+The initial revision creates the baseline schema and built-in skill catalog;
+the following revision updates review/report foreign keys without deleting
+rows. The initial downgrade is intentionally disabled to prevent accidental
+deletion of user data. Never run migrations automatically from application
+workers.

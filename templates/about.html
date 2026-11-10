@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Learn how SkillSwap helps people share skills and learn together.">
+    <title>About SkillSwap</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header class="site-header"><nav class="navbar shell" aria-label="Main navigation"><a class="brand" href="{{ url_for('home') }}"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>Skill<span class="brand-accent">Swap</span></span></a><div class="profile-header-links"><a class="nav-link" href="{{ url_for('find_skills') }}">Find Skills</a><a class="nav-link" href="{{ url_for('home') }}#how-it-works">How it works</a><a class="button button-small button-dark" href="{{ url_for('register') }}">Join SkillSwap</a></div></nav></header>
+    <main class="about-page shell">
+        <section class="about-hero"><p class="eyebrow">Learn from one another</p><h1>Knowledge grows<br><em>when it’s shared.</em></h1><p>SkillSwap helps members connect around practical skills, agree on an exchange, and learn directly from each other.</p><a class="button button-dark" href="{{ url_for('find_skills') }}">Explore skills <span aria-hidden="true">↗</span></a></section>
+        <section class="about-steps"><article><span>01</span><h2>Build your profile</h2><p>Tell the community what you can teach and what you want to learn.</p></article><article><span>02</span><h2>Find a match</h2><p>Search active skill listings and connect with members whose knowledge fits your goals.</p></article><article><span>03</span><h2>Learn together</h2><p>Coordinate a session, confirm completion together, then share a rating.</p></article></section>
+        <section class="about-footer"><h2>Ready to make an exchange?</h2><p>Start with a skill you already know or one you’re curious about.</p><a class="button button-dark" href="{{ url_for('register') }}">Create an account</a></section>
+    </main>
+</body>
+</html>

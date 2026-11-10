@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="View {{ profile_user.name }}'s SkillSwap profile.">
+    <title>{{ profile_user.name }} | SkillSwap</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header class="site-header">
+        <nav class="navbar shell" aria-label="Main navigation">
+            <a class="brand" href="{{ url_for('home') }}" aria-label="SkillSwap home">
+                <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+                <span>Skill<span class="brand-accent">Swap</span></span>
+            </a>
+            <div class="profile-header-links">
+                {% if current_user.is_authenticated %}
+                    <a class="nav-link" href="{{ url_for('dashboard') }}">Dashboard</a>
+                    <a class="button button-small button-outline" href="{{ url_for('my_profile') }}">My profile</a>
+                {% else %}
+                    <a class="nav-link" href="{{ url_for('login') }}">Log in</a>
+                    <a class="button button-small button-dark" href="{{ url_for('register') }}">Join SkillSwap <span aria-hidden="true">↗</span></a>
+                {% endif %}
+            </div>
+        </nav>
+    </header>
+
+    <main class="profile-page shell">
+        <section class="profile-hero" aria-labelledby="profile-name">
+            <div class="profile-avatar">
+                <span class="avatar-initial" aria-hidden="true">{{ profile_user.name[:1]|upper }}</span>
+                {% if profile_user.profile_image %}
+                    <img data-avatar-image src="{{ profile_user.profile_image }}" alt="Profile photo of {{ profile_user.name }}">
+                {% endif %}
+            </div>
+            <div class="profile-identity">
+                <p class="eyebrow">SkillSwap member</p>
+                <h1 id="profile-name">{{ profile_user.name }}</h1>
+                <p class="profile-username">@{{ profile_user.username }}</p>
+                {% if show_location and profile_user.location %}<p class="profile-location"><span aria-hidden="true">⌖</span> {{ profile_user.location }}</p>{% endif %}
+            </div>
+            {% if is_own_profile %}
+                <a class="button button-light profile-edit-button" href="{{ url_for('edit_profile') }}">Edit profile <span aria-hidden="true">↗</span></a>
+            {% elif current_user.is_authenticated %}
+                <a class="button button-light profile-edit-button" href="{{ url_for('report_user_page', user_id=profile_user.id) }}">Report member</a>
+            {% endif %}
+        </section>
+
+        <div class="profile-content-grid">
+            <div class="profile-main-column">
+                <section class="profile-section" aria-labelledby="about-title">
+                    <div class="profile-section-heading"><p class="eyebrow">A little about {{ 'you' if is_own_profile else 'them' }}</p><h2 id="about-title">About</h2></div>
+                    {% if profile_user.bio %}
+                        <p class="profile-bio-text">{{ profile_user.bio }}</p>
+                    {% elif is_own_profile %}
+                        <p class="profile-empty">Add a short bio so other members can get to know you.</p>
+                    {% else %}
+                        <p class="profile-empty">This member hasn’t added a bio yet.</p>
+                    {% endif %}
+                </section>
+
+                <section class="profile-section" aria-labelledby="teaching-title">
+                    <div class="profile-section-heading"><p class="eyebrow">Knowledge to share</p><h2 id="teaching-title">Skills I Teach</h2></div>
+                    {% if skills_to_teach %}
+                        <div class="profile-skill-list">
+                            {% for user_skill in skills_to_teach %}
+                                <article class="profile-skill-item"><span class="profile-skill-mark" aria-hidden="true">↗</span><div><h3>{{ user_skill.skill.name }}</h3>{% if user_skill.skill.description %}<p>{{ user_skill.skill.description }}</p>{% endif %}</div></article>
+                            {% endfor %}
+                        </div>
+                    {% else %}
+                        <p class="profile-empty">No teaching skills added yet.</p>
+                    {% endif %}
+                </section>
+
+                <section class="profile-section" aria-labelledby="learning-title">
+                    <div class="profile-section-heading"><p class="eyebrow">Curious about</p><h2 id="learning-title">Skills I Want to Learn</h2></div>
+                    {% if skills_to_learn %}
+                        <div class="profile-skill-list">
+                            {% for user_skill in skills_to_learn %}
+                                <article class="profile-skill-item"><span class="profile-skill-mark skill-mark-learn" aria-hidden="true">＋</span><div><h3>{{ user_skill.skill.name }}</h3>{% if user_skill.skill.description %}<p>{{ user_skill.skill.description }}</p>{% endif %}</div></article>
+                            {% endfor %}
+                        </div>
+                    {% else %}
+                        <p class="profile-empty">No learning goals added yet.</p>
+                    {% endif %}
+                </section>
+            </div>
+
+            <aside class="profile-side-column">
+                <section class="profile-rating-panel" aria-label="Member ratings">
+                    <p class="eyebrow">Community feedback</p>
+                    <div class="profile-rating-value"><span aria-hidden="true">★</span>{% if average_rating is not none %}{{ '%.1f'|format(average_rating) }}{% else %}—{% endif %}</div>
+                    <p class="profile-review-count">{% if review_count %}{{ review_count }} review{% if review_count != 1 %}s{% endif %}{% else %}No reviews yet{% endif %}</p>
+                    <p class="profile-review-count">Rating distribution:
+                        {% for stars, count in rating_distribution.items() %}{{ stars }}★ {{ count }}{% if not loop.last %} · {% endif %}{% endfor %}
+                    </p>
+                </section>
+
+                <section class="profile-section profile-reviews" aria-labelledby="reviews-title">
+                    <div class="profile-section-heading"><p class="eyebrow">From the community</p><h2 id="reviews-title">Reviews</h2></div>
+                    {% if recent_reviews %}
+                        <div class="profile-review-list">
+                            {% for review in recent_reviews %}
+                                <article class="profile-review-item">
+                                    <div class="review-byline"><strong>{{ review.reviewer.name }}</strong><span>★ {{ review.rating }}/5</span></div>
+                                    <p>{{ review.comment or 'Left a rating after a skill exchange.' }}</p>
+                                    <time datetime="{{ review.created_at.isoformat() }}">{{ review.created_at.strftime('%b %Y') }}</time>
+                                </article>
+                            {% endfor %}
+                        </div>
+                    {% else %}
+                        <p class="profile-empty">Reviews will appear here after skill exchanges.</p>
+                    {% endif %}
+                </section>
+
+                <p class="profile-member-since">Member since {{ profile_user.created_at.strftime('%B %Y') }}</p>
+            </aside>
+        </div>
+    </main>
+    <script src="{{ url_for('static', filename='js/script.js') }}" defer></script>
+</body>
+</html>

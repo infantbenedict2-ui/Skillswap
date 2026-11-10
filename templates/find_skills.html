@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Search active SkillSwap skills and members who teach them.">
+    <title>Find Skills | SkillSwap</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header class="site-header"><nav class="navbar shell" aria-label="Main navigation">
+        <a class="brand" href="{{ url_for('home') }}"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>Skill<span class="brand-accent">Swap</span></span></a>
+        <div class="profile-header-links"><a class="nav-link" href="{{ url_for('home') }}">Home</a>{% if current_user.is_authenticated %}<a class="nav-link" href="{{ url_for('dashboard') }}">Dashboard</a>{% else %}<a class="nav-link" href="{{ url_for('login') }}">Log in</a>{% endif %}</div>
+    </nav></header>
+    <main class="discovery-page shell">
+        <header class="discovery-heading"><p class="eyebrow">Real skills, real members</p><h1>Find a skill to <em>swap.</em></h1><p>Search active skill listings from members. Choose a teacher to view their profile and request an exchange.</p></header>
+        <form class="discovery-filters" method="get" action="{{ url_for('find_skills') }}">
+            <label for="find-query"><span>Skill</span><input id="find-query" name="q" type="search" value="{{ search_term }}" maxlength="120" placeholder="Skill name or description"></label>
+            <label for="find-category"><span>Category</span><select id="find-category" name="category"><option value="">All categories</option>{% for category in categories %}<option value="{{ category }}"{% if selected_category == category %} selected{% endif %}>{{ category }}</option>{% endfor %}</select></label>
+            <label for="find-location"><span>Location</span><input id="find-location" name="location" type="search" value="{{ location }}" maxlength="120" placeholder="City or campus"></label>
+            <label for="find-rating"><span>Minimum rating</span><select id="find-rating" name="min_rating">{% for rating in [0, 1, 2, 3, 4, 4.5] %}<option value="{{ rating }}"{% if minimum_rating == rating %} selected{% endif %}>{{ 'Any rating' if rating == 0 else rating|string ~ ' stars +' }}</option>{% endfor %}</select></label>
+            <label for="find-experience"><span>Teaching experience</span><select id="find-experience" name="experience"><option value="">Any experience</option>{% for level in ['beginner', 'intermediate', 'advanced'] %}<option value="{{ level }}"{% if experience_level == level %} selected{% endif %}>{{ level|capitalize }}</option>{% endfor %}</select></label>
+            <label for="find-availability"><span>Availability</span><select id="find-availability" name="availability"><option value="">Any availability</option>{% for option in [('weekdays', 'Weekdays'), ('weekends', 'Weekends'), ('evenings', 'Evenings'), ('flexible', 'Flexible')] %}<option value="{{ option[0] }}"{% if availability == option[0] %} selected{% endif %}>{{ option[1] }}</option>{% endfor %}</select></label>
+            <button class="button button-dark" type="submit">Search skills <span aria-hidden="true">⌕</span></button>
+        </form>
+        <p class="discovery-result-count">{{ results|length }} result{% if results|length != 1 %}s{% endif %}{% if results|length == 100 %} (showing the first 100){% endif %}</p>
+        {% if results %}
+            <div class="discovery-grid">
+                {% for member, skill, rating in results %}
+                    <article class="discovery-card">
+                        <div class="discovery-card-top"><span class="discovery-skill-icon">{{ skill.name[:2]|upper }}</span><span class="discovery-category">{{ skill.category or 'Other' }}</span></div>
+                        <h2><a href="{{ url_for('skill_detail', skill_id=skill.id) }}">{{ skill.name }}</a></h2>
+                        <p class="discovery-teacher">Taught by <a href="{{ url_for('user_profile', user_id=member.id) }}">{{ member.name }}</a></p>
+                        {% if member.location_visibility and member.location %}<p class="discovery-location">⌖ {{ member.location }}</p>{% endif %}
+                        <p class="discovery-rating">{% if rating is not none %}★ {{ '%.1f'|format(rating) }} average{% else %}Not rated yet{% endif %}</p>
+                        {% if skill.experience_level %}<p class="discovery-description">Experience: {{ skill.experience_level|capitalize }}</p>{% endif %}
+                        {% if skill.availability %}<p class="discovery-description">Available: {{ skill.availability|capitalize }}</p>{% endif %}
+                        {% if skill.description %}<p class="discovery-description">{{ skill.description|truncate(180, true) }}</p>{% endif %}
+                        <div class="discovery-actions"><a class="button button-outline" href="{{ url_for('user_profile', user_id=member.id) }}">View profile</a>
+                            {% if current_user.is_authenticated and skill.id in learning_skill_ids %}
+                                <form method="post" action="{{ url_for('create_skill_request') }}"><input type="hidden" name="receiver_id" value="{{ member.id }}"><input type="hidden" name="skill_id" value="{{ skill.id }}"><label class="sr-only" for="discovery-message-{{ member.id }}-{{ skill.id }}">Message to {{ member.name }}</label><textarea id="discovery-message-{{ member.id }}-{{ skill.id }}" name="message" rows="2" maxlength="1000" required placeholder="Add a short message"></textarea><button class="button button-dark" type="submit">Request swap</button></form>
+                            {% elif current_user.is_authenticated %}
+                                <a class="button button-dark" href="{{ url_for('manage_skills') }}">Add to learning list</a>
+                            {% else %}<a class="button button-dark" href="{{ url_for('login', next=request.full_path) }}">Log in to request</a>{% endif %}
+                        </div>
+                    </article>
+                {% endfor %}
+            </div>
+        {% else %}
+            <section class="discovery-empty"><span aria-hidden="true">⌕</span><h2>No teacher listings match yet</h2><p>Try a different search, category, location, or rating.</p>{% if current_user.is_authenticated %}<a class="button button-outline" href="{{ url_for('manage_skills') }}">Add learning skills</a>{% else %}<a class="button button-dark" href="{{ url_for('register') }}">Join SkillSwap</a>{% endif %}</section>
+        {% endif %}
+    </main>
+    <script src="{{ url_for('static', filename='js/script.js') }}" defer></script>
+</body>
+</html>

@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Review completed SkillSwap exchanges and see community feedback.">
+    <title>Reviews | SkillSwap</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header class="site-header">
+        <nav class="navbar shell" aria-label="Main navigation">
+            <a class="brand" href="{{ url_for('home') }}" aria-label="SkillSwap home">
+                <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+                <span>Skill<span class="brand-accent">Swap</span></span>
+            </a>
+            <div class="profile-header-links">
+                <a class="nav-link" href="{{ url_for('dashboard') }}">Dashboard</a>
+                <a class="button button-small button-outline" href="{{ url_for('view_requests') }}">Requests</a>
+            </div>
+        </nav>
+    </header>
+
+    <main class="reviews-page shell">
+        <div class="reviews-page-heading">
+            <div><p class="eyebrow">A little feedback goes a long way</p><h1>Reviews</h1><p>Reflect on completed exchanges and celebrate the people who helped you learn.</p></div>
+            <a class="reviews-back-link" href="{{ url_for('dashboard') }}">← Back to dashboard</a>
+        </div>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="form-flashes" aria-live="polite">
+                    {% for category, message in messages %}
+                        <p class="flash-message flash-{{ category }}" role="{{ 'alert' if category == 'error' else 'status' }}">{{ message }}</p>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+
+        <section class="review-summary" aria-label="Your received review rating">
+            <div><p class="eyebrow">Your community rating</p><strong>{% if average_rating is not none %}{{ '%.1f'|format(average_rating) }}{% else %}—{% endif %}</strong><span class="rating-stars" aria-label="{% if average_rating is not none %}Average rating {{ '%.1f'|format(average_rating) }} out of 5{% else %}No rating yet{% endif %}">{% for star in range(1, 6) %}{{ '★' if average_rating is not none and star <= average_rating|round(0, 'floor') else '☆' }}{% endfor %}</span><p>{% if review_count %}{{ review_count }} review{% if review_count != 1 %}s{% endif %} received{% else %}No reviews received yet{% endif %}</p></div>
+            <span class="review-summary-mark" aria-hidden="true">★</span>
+        </section>
+
+        <section class="session-rating-panel" aria-labelledby="session-ratings-title">
+            <div class="reviews-panel-heading"><div><p class="eyebrow">After both people confirm a session</p><h2 id="session-ratings-title">Session ratings</h2><p>Each participant may independently leave one 1–5 star rating.</p></div></div>
+            {% if completed_sessions_to_rate %}
+                <div class="reviewable-list">
+                    {% for item in completed_sessions_to_rate %}
+                        <article class="reviewable-exchange">
+                            <div class="review-exchange-info"><span class="exchange-skill-icon" aria-hidden="true">{{ item.session.skill.name[:1]|upper }}</span><div><strong>{{ item.session.title }}</strong><span>{{ item.session.skill.name }} · with <a href="{{ url_for('user_profile', user_id=item.other_user.id) }}">{{ item.other_user.name }}</a> · {{ item.session.date.strftime('%b %d, %Y') }}</span></div></div>
+                            {% if item.review %}
+                                <div class="submitted-review"><span class="stars-display" aria-label="{{ item.review.rating }} out of 5 stars">{% for star in range(1, 6) %}{{ '★' if star <= item.review.rating else '☆' }}{% endfor %}</span><span>You rated this session</span></div>
+                                {% if item.review.comment %}<p class="submitted-review-comment">{{ item.review.comment }}</p>{% endif %}
+                            {% else %}
+                                <form class="review-form" data-rating-form data-endpoint="{{ url_for('create_rating') }}" data-session-id="{{ item.session.id }}">
+                                    <fieldset class="rating-fieldset"><legend>Your rating</legend><div class="star-picker">{% for rating in range(1, 6) %}<input id="session-{{ item.session.id }}-rating-{{ rating }}" type="radio" name="rating" value="{{ rating }}" required><label for="session-{{ item.session.id }}-rating-{{ rating }}" aria-label="{{ rating }} star{% if rating != 1 %}s{% endif %}">★</label>{% endfor %}</div></fieldset>
+                                    <label class="review-comment-field" for="session-review-comment-{{ item.session.id }}"><span>Comment <small>Optional</small></span><textarea id="session-review-comment-{{ item.session.id }}" name="comment" rows="3" maxlength="1000" placeholder="Share a helpful note about this session."></textarea></label>
+                                    <div class="app-feedback" data-feedback role="status" aria-live="polite"></div><button class="button button-dark review-submit" type="submit">Submit session rating <span aria-hidden="true">↗</span></button>
+                                </form>
+                            {% endif %}
+                        </article>
+                    {% endfor %}
+                </div>
+            {% else %}<p class="reviews-empty">Sessions appear here once they are completed and ready for feedback.</p>{% endif %}
+        </section>
+
+        <div class="reviews-columns">
+            <section class="reviews-panel" aria-labelledby="write-review-title">
+                <div class="reviews-panel-heading"><div><p class="eyebrow">Close the loop</p><h2 id="write-review-title">Review a completed exchange</h2></div><span class="reviews-heading-mark" aria-hidden="true">✳</span></div>
+                {% if reviewable_exchanges %}
+                    <div class="reviewable-list">
+                        {% for item in reviewable_exchanges %}
+                            <article class="reviewable-exchange" id="exchange-{{ item.request.id }}">
+                                <div class="review-exchange-info"><span class="exchange-skill-icon" aria-hidden="true">{{ item.request.skill.name[:1]|upper }}</span><div><strong>{{ item.request.skill.name }}</strong><span>with <a href="{{ url_for('user_profile', user_id=item.other_user.id) }}">{{ item.other_user.name }}</a> · {{ item.request.created_at.strftime('%b %d, %Y') }}</span></div></div>
+                                {% if item.review %}
+                                    <div class="submitted-review"><span class="stars-display" aria-label="{{ item.review.rating }} out of 5 stars">{% for star in range(1, 6) %}{{ '★' if star <= item.review.rating else '☆' }}{% endfor %}</span><span>You reviewed this exchange</span></div>
+                                    {% if item.review.comment %}<p class="submitted-review-comment">{{ item.review.comment }}</p>{% endif %}
+                                {% else %}
+                                    <form class="review-form" method="post" action="{{ url_for('reviews') }}">
+                                        <input type="hidden" name="skill_request_id" value="{{ item.request.id }}">
+                                        <fieldset class="rating-fieldset">
+                                            <legend>Your rating</legend>
+                                            <div class="star-picker">
+                                                {% for rating in range(1, 6) %}
+                                                    <input id="exchange-{{ item.request.id }}-rating-{{ rating }}" type="radio" name="rating" value="{{ rating }}" required>
+                                                    <label for="exchange-{{ item.request.id }}-rating-{{ rating }}" aria-label="{{ rating }} star{% if rating != 1 %}s{% endif %}">★</label>
+                                                {% endfor %}
+                                            </div>
+                                        </fieldset>
+                                        <label class="review-comment-field" for="review-comment-{{ item.request.id }}"><span>Written review <small>Optional</small></span><textarea id="review-comment-{{ item.request.id }}" name="comment" rows="3" maxlength="1000" placeholder="What did you appreciate about the exchange?"></textarea></label>
+                                        <button class="button button-dark review-submit" type="submit">Submit review <span aria-hidden="true">↗</span></button>
+                                    </form>
+                                {% endif %}
+                            </article>
+                        {% endfor %}
+                    </div>
+                {% else %}
+                    <p class="reviews-empty">Completed skill exchanges will appear here when they’re ready for a review.</p>
+                    <a class="reviews-text-link" href="{{ url_for('view_requests') }}">View skill requests <span aria-hidden="true">↗</span></a>
+                {% endif %}
+            </section>
+
+            <section class="reviews-panel" aria-labelledby="recent-reviews-title">
+                <div class="reviews-panel-heading"><div><p class="eyebrow">Feedback from your community</p><h2 id="recent-reviews-title">Recent reviews</h2></div><span class="reviews-heading-mark received-mark" aria-hidden="true">★</span></div>
+                {% if recent_reviews %}
+                    <div class="recent-review-list">
+                        {% for review in recent_reviews %}
+                            <article class="recent-review-card">
+                                <div class="recent-review-heading"><div><a href="{{ url_for('user_profile', user_id=review.reviewer.id) }}">{{ review.reviewer.name }}</a><time datetime="{{ review.created_at.isoformat() }}">{{ review.created_at.strftime('%b %d, %Y') }}</time></div><span class="stars-display" aria-label="{{ review.rating }} out of 5 stars">{% for star in range(1, 6) %}{{ '★' if star <= review.rating else '☆' }}{% endfor %}</span></div>
+                                <p>{{ review.comment or 'Shared a rating after a completed exchange.' }}</p>
+                            </article>
+                        {% endfor %}
+                    </div>
+                {% else %}
+                    <p class="reviews-empty">Reviews you receive will appear here.</p>
+                {% endif %}
+            </section>
+        </div>
+    </main>
+</body>
+</html>

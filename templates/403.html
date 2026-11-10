@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Access restricted | SkillSwap</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header class="site-header">
+        <nav class="navbar shell" aria-label="Main navigation">
+            <a class="brand" href="{{ url_for('home') }}" aria-label="SkillSwap home"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>Skill<span class="brand-accent">Swap</span></span></a>
+        </nav>
+    </header>
+    <main class="error-page shell">
+        <section class="error-panel" aria-labelledby="error-title">
+            <span class="error-code" aria-hidden="true">403</span>
+            <p class="eyebrow">This area is restricted</p>
+            <h1 id="error-title">You can’t access this page.</h1>
+            <p>If you think you should have access, contact a SkillSwap administrator.</p>
+            <a class="button button-dark" href="{{ url_for('home') }}">Back to SkillSwap <span aria-hidden="true">→</span></a>
+        </section>
+    </main>
+</body>
+</html>

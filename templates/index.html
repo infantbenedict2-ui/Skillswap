@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Trade what you know for what you want to learn with SkillSwap.">
+    <title>SkillSwap | Learn. Teach. Connect.</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header class="site-header">
+        <nav class="navbar shell" aria-label="Main navigation">
+            <a class="brand" href="{{ url_for('home') }}" aria-label="SkillSwap home">
+                <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+                <span>Skill<span class="brand-accent">Swap</span></span>
+            </a>
+            <button class="menu-toggle" type="button" aria-label="Open navigation" aria-expanded="false" aria-controls="nav-links">
+                <span></span><span></span>
+            </button>
+            <div class="nav-links" id="nav-links">
+                <a class="nav-link active" href="{{ url_for('home') }}">Home</a>
+                <a class="nav-link" href="{{ url_for('find_skills') }}">Find Skills</a>
+                <a class="nav-link" href="{{ url_for('home') }}#how-it-works">How It Works</a>
+                <a class="nav-link" href="{{ url_for('about') }}">About</a>
+                {% if current_user.is_authenticated %}
+                    <a class="nav-link login-link" href="{{ url_for('dashboard') }}">Dashboard</a>
+                    <a class="button button-small button-dark nav-register" href="{{ url_for('dashboard') }}">My space <span aria-hidden="true">↗</span></a>
+                {% else %}
+                    <a class="nav-link login-link" href="{{ url_for('login') }}">Login</a>
+                    <a class="button button-small button-dark nav-register" href="{{ url_for('register') }}">Register <span aria-hidden="true">↗</span></a>
+                {% endif %}
+            </div>
+        </nav>
+    </header>
+
+    <main>
+        <section class="hero section-pad" id="home">
+            <div class="hero-grid shell">
+                <div class="hero-copy">
+                    <p class="eyebrow"><span class="eyebrow-dot"></span> Your next skill starts with someone</p>
+                    <h1>Learn.<br>Teach.<br><span>Connect.</span></h1>
+                    <p class="hero-description">Swap what you know for something new. SkillSwap brings students together to share practical skills, learn from each other, and grow as a community.</p>
+                    <div class="hero-actions">
+                        <a class="button button-dark" href="#skills">Find a Skill <span aria-hidden="true">↗</span></a>
+                        <a class="button button-outline" href="#how-it-works">Share a Skill <span aria-hidden="true">→</span></a>
+                    </div>
+                    <div class="community-note"><span class="hero-note-symbol" aria-hidden="true">⇄</span><p><strong>Good things grow together.</strong><br>A community built on sharing.</p></div>
+                </div>
+
+                <div class="hero-art" aria-label="A visual illustration of skills being exchanged">
+                    <div class="art-grid" aria-hidden="true"></div>
+                    <div class="art-label"><span class="live-dot"></span> The SkillSwap loop</div>
+                    <div class="swap-card swap-card-top">
+                        <div class="person-row"><span class="person-avatar person-maya" aria-hidden="true">↗</span><span><strong>Share what you know</strong><small>Your teaching skills</small></span><span class="person-arrow" aria-hidden="true">↗</span></div>
+                        <div class="skill-pill skill-design"><span aria-hidden="true">✳</span> Teach a skill</div>
+                    </div>
+                    <div class="swap-connector"><span>⇄</span><small>skill<br>swap</small></div>
+                    <div class="swap-card swap-card-bottom">
+                        <div class="person-row"><span class="person-avatar person-alex" aria-hidden="true">＋</span><span><strong>Learn something new</strong><small>Your learning goals</small></span><span class="person-arrow" aria-hidden="true">↗</span></div>
+                        <div class="skill-pill skill-code"><span aria-hidden="true">✳</span> Find a match</div>
+                    </div>
+                    <div class="art-sticker" aria-hidden="true">learn<br>together<span>✳</span></div>
+                    <div class="art-caption"><span>01 / 03</span><span>Different skills. Shared ambition.</span></div>
+                </div>
+            </div>
+            <div class="hero-bottom shell"><span>Made for curious minds</span><span class="hero-bottom-line"></span><span>Built around what we can teach each other</span></div>
+        </section>
+
+        <section class="skills-section section-pad" id="skills">
+            <div class="shell">
+                <div class="section-heading skills-heading">
+                    <div><p class="eyebrow">Explore the possibilities</p><h2>A skill for every<br><em>next step.</em></h2></div>
+                    <div class="skills-intro"><p>Explore the active skills in the catalog and find members who teach what you want to learn.</p><label class="skill-search"><span aria-hidden="true">⌕</span><input id="skill-search" type="search" placeholder="Search skills" aria-label="Search skills"></label></div>
+                </div>
+                <div class="skills-grid" id="skills-grid">
+                    {% for skill in catalog_skills %}
+                        <a class="skill-card" href="{{ url_for('skill_detail', skill_id=skill.id) }}" data-skill="{{ skill.name|lower }} {{ skill.category|lower if skill.category else '' }}"><span class="skill-icon {{ loop.cycle('icon-mint', 'icon-blue', 'icon-yellow', 'icon-coral') }}">{{ skill.name[:2]|upper }}</span><span>{{ skill.name }}</span><span class="skill-arrow" aria-hidden="true">↗</span></a>
+                    {% else %}
+                        <p class="dashboard-empty">The skill catalog is empty right now. Check back soon.</p>
+                    {% endfor %}
+                </div>
+                <p class="no-results" id="no-results" hidden>No skills match that search. Try another keyword.</p>
+                <div class="skills-footer"><span>{{ catalog_skills|length }} active skills</span><span class="skills-footer-rule"></span><a href="{{ url_for('find_skills') }}">Explore teachers <span aria-hidden="true">↗</span></a></div>
+            </div>
+        </section>
+
+        <section class="popular-section section-pad" aria-labelledby="popular-title">
+            <div class="shell">
+                <div class="section-heading"><div><p class="eyebrow">From the community catalog</p><h2 id="popular-title">Skills people<br><em>are sharing.</em></h2></div><p class="section-summary">These are the skills with the most member teaching and learning entries right now.</p></div>
+                <div class="popular-skill-grid">
+                    {% for skill, usage_count in popular_skills %}
+                        <a class="popular-skill-card" href="{{ url_for('skill_detail', skill_id=skill.id) }}"><span>{{ skill.category or 'Other' }}</span><strong>{{ skill.name }}</strong><small>{{ usage_count }} member skill listing{% if usage_count != 1 %}s{% endif %}</small></a>
+                    {% else %}
+                        <p class="dashboard-empty">Popular skills will appear as members add skills to their profiles.</p>
+                    {% endfor %}
+                </div>
+                <div class="featured-category-list" aria-label="Featured skill categories">
+                    {% for category, skill_count in featured_categories %}
+                        <a href="{{ url_for('find_skills', category=category) }}"><span>{{ category }}</span><small>{{ skill_count }} active skill{% if skill_count != 1 %}s{% endif %}</small><b aria-hidden="true">↗</b></a>
+                    {% else %}
+                        <p class="dashboard-empty">Skill categories will appear when the active catalog has entries.</p>
+                    {% endfor %}
+                </div>
+            </div>
+        </section>
+
+        <section class="steps-section section-pad" id="how-it-works">
+            <div class="shell">
+                <div class="section-heading steps-heading"><div><p class="eyebrow">Simple by design</p><h2>Good things happen<br><em>when we swap.</em></h2></div><p class="section-summary">A few simple steps bring the right people together. You bring the curiosity; we’ll help you find your match.</p></div>
+                <ol class="steps-list">
+                    <li class="step-item"><span class="step-number">01</span><span class="step-symbol symbol-coral">○</span><h3>Create profile</h3><p>Introduce yourself and what you’re curious about.</p></li>
+                    <li class="step-item"><span class="step-number">02</span><span class="step-symbol symbol-yellow">＋</span><h3>Add your skills</h3><p>Share what you can teach and what you want to learn.</p></li>
+                    <li class="step-item"><span class="step-number">03</span><span class="step-symbol symbol-blue">⌕</span><h3>Find people</h3><p>Discover people whose skills complement yours.</p></li>
+                    <li class="step-item"><span class="step-number">04</span><span class="step-symbol symbol-green">↗</span><h3>Send a request</h3><p>Suggest a skill swap and start a conversation.</p></li>
+                    <li class="step-item"><span class="step-number">05</span><span class="step-symbol symbol-coral">✳</span><h3>Learn and teach</h3><p>Meet, exchange knowledge, and grow together.</p></li>
+                </ol>
+            </div>
+        </section>
+
+        <section class="features-section section-pad" id="features">
+            <div class="shell">
+                <div class="features-layout">
+                    <div class="features-intro"><p class="eyebrow">A thoughtful way to learn</p><h2>More than a<br><em>skill exchange.</em></h2><p>Everything you need to make learning together feel easy, clear, and rewarding.</p><a class="text-link" href="#join">Join the community <span aria-hidden="true">↗</span></a></div>
+                    <div class="features-grid">
+                        <article class="feature-item"><span class="feature-icon feature-mint" aria-hidden="true">⇄</span><h3>Skill matching</h3><p>Find people whose know-how lines up with what you want to learn.</p></article>
+                        <article class="feature-item"><span class="feature-icon feature-coral" aria-hidden="true">↗</span><h3>Skill requests</h3><p>Make a clear request and set a swap in motion.</p></article>
+                        <article class="feature-item"><span class="feature-icon feature-yellow" aria-hidden="true">···</span><h3>Messaging</h3><p>Coordinate your exchange and get to know your learning partner.</p></article>
+                        <article class="feature-item"><span class="feature-icon feature-blue" aria-hidden="true">★</span><h3>Ratings and reviews</h3><p>Build trust with thoughtful feedback from your community.</p></article>
+                        <article class="feature-item"><span class="feature-icon feature-yellow" aria-hidden="true">♧</span><h3>Notifications</h3><p>Keep up with replies, requests, and the next step in your swap.</p></article>
+                        <article class="feature-item"><span class="feature-icon feature-mint" aria-hidden="true">✓</span><h3>Secure login</h3><p>Keep your profile and conversations protected.</p></article>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="cta-section section-pad" id="join">
+            <div class="cta-inner shell"><div class="cta-mark" aria-hidden="true"><span>↗</span><span>✳</span><span>＋</span></div><p class="eyebrow">Your turn to make the first move</p><h2>Ready to share<br>your skills?</h2><p>There’s something you know that someone else is ready to learn.</p><a class="button button-light" href="{{ url_for('register') }}">Register <span aria-hidden="true">↗</span></a><span class="cta-side-note">Start with what<br>you already know.</span></div>
+        </section>
+    </main>
+
+    <footer class="site-footer">
+        <div class="shell footer-main">
+            <a class="brand footer-brand" href="{{ url_for('home') }}"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>Skill<span class="brand-accent">Swap</span></span></a>
+            <p class="footer-tagline">A little knowledge goes<br>a long way.</p>
+            <div class="footer-links"><span>Explore</span><a href="{{ url_for('find_skills') }}">Find Skills</a><a href="{{ url_for('home') }}#how-it-works">How It Works</a><a href="{{ url_for('about') }}">About</a></div>
+            <div class="footer-links"><span>Get started</span><a href="{{ url_for('login') }}">Login</a><a href="{{ url_for('register') }}">Register</a></div>
+        </div>
+        <div class="shell footer-bottom"><span>© <span id="current-year">2026</span> SkillSwap</span><span>Learn from each other. Grow together.</span><a href="{{ url_for('home') }}">Back to top ↑</a></div>
+    </footer>
+    <script src="{{ url_for('static', filename='js/script.js') }}" defer></script>
+</body>
+</html>

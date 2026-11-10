@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Manage your SkillSwap privacy and notification preferences.">
+    <title>Privacy settings | SkillSwap</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header class="site-header"><nav class="navbar shell" aria-label="Main navigation"><a class="brand" href="{{ url_for('home') }}"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>Skill<span class="brand-accent">Swap</span></span></a><div class="profile-header-links"><a class="nav-link" href="{{ url_for('dashboard') }}">Dashboard</a><a class="nav-link" href="{{ url_for('blocked_page') }}">Blocked users</a></div></nav></header>
+    <main class="app-page shell">
+        <header class="app-page-heading"><div><p class="eyebrow">Your account, your choices</p><h1>Privacy settings</h1><p>Choose what other members can see and which in-app notifications you receive.</p></div></header>
+        <div class="app-feedback" data-feedback role="status" aria-live="polite"></div>
+        <form class="app-panel privacy-form" data-privacy-form data-endpoint="{{ url_for('get_privacy_settings') }}">
+            <fieldset><legend>Profile visibility</legend><label class="form-field" for="profile-visibility"><span>Who can view your profile?</span><select id="profile-visibility" name="profile_visibility"><option value="public">Public to members</option><option value="private">Private</option></select></label><p class="privacy-help">Private profiles are hidden from search and other members.</p></fieldset>
+            <fieldset><legend>Visibility details</legend><label class="toggle-row"><input type="checkbox" name="location_visibility"><span>Show my location on my profile</span></label><label class="toggle-row"><input type="checkbox" name="online_status_visibility"><span>Show my online status</span></label></fieldset>
+            <fieldset><legend>In-app notifications</legend><label class="toggle-row"><input type="checkbox" name="requests"><span>Swap requests and updates</span></label><label class="toggle-row"><input type="checkbox" name="messages"><span>New messages</span></label><label class="toggle-row"><input type="checkbox" name="sessions"><span>Session updates</span></label><label class="toggle-row"><input type="checkbox" name="ratings"><span>Ratings received</span></label></fieldset>
+            <button class="button button-dark" type="submit">Save privacy settings <span aria-hidden="true">✓</span></button>
+        </form>
+        <p class="privacy-help app-page-note">You can block members and manage your block list from <a href="{{ url_for('blocked_page') }}">Blocked users</a>.</p>
+    </main>
+    <script src="{{ url_for('static', filename='js/script.js') }}" defer></script>
+</body>
+</html>

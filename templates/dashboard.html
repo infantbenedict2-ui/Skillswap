@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Your SkillSwap activity and skill exchange dashboard.">
+    <title>Dashboard | SkillSwap</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header class="site-header">
+        <nav class="navbar shell" aria-label="Main navigation">
+            <a class="brand" href="{{ url_for('home') }}" aria-label="SkillSwap home">
+                <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+                <span>Skill<span class="brand-accent">Swap</span></span>
+            </a>
+            <div class="profile-header-links"><a class="dashboard-site-link" href="{{ url_for('home') }}">Visit SkillSwap <span aria-hidden="true">↗</span></a><button class="menu-toggle" type="button" aria-label="Open dashboard navigation" aria-expanded="false" aria-controls="dashboard-navigation"><span></span><span></span></button></div>
+        </nav>
+    </header>
+
+    <main class="dashboard-layout shell">
+        <aside class="dashboard-sidebar" aria-label="Dashboard navigation">
+            <p class="dashboard-sidebar-title">Your workspace</p>
+            <nav class="dashboard-navigation" id="dashboard-navigation">
+                <a class="dashboard-nav-link is-current" href="#dashboard"><span aria-hidden="true">⌂</span>Dashboard</a>
+                <a class="dashboard-nav-link" href="{{ url_for('my_profile') }}"><span aria-hidden="true">◉</span>My Profile</a>
+                <a class="dashboard-nav-link" href="{{ url_for('manage_skills') }}"><span aria-hidden="true">✳</span>My Skills</a>
+                <a class="dashboard-nav-link" href="{{ url_for('find_skills') }}"><span aria-hidden="true">⌕</span>Find Skills</a>
+                <a class="dashboard-nav-link" href="{{ url_for('matches') }}"><span aria-hidden="true">⇄</span>Matches</a>
+                <a class="dashboard-nav-link" href="{{ url_for('view_requests') }}"><span aria-hidden="true">↗</span>Requests</a>
+                <a class="dashboard-nav-link" href="{{ url_for('messages') }}"><span aria-hidden="true">···</span>Messages</a>
+                <a class="dashboard-nav-link" href="{{ url_for('session_center') }}"><span aria-hidden="true">◷</span>Sessions</a>
+                <a class="dashboard-nav-link" href="{{ url_for('view_notifications') }}"><span aria-hidden="true">♧</span>Notifications{% if unread_notifications %}<span class="dashboard-unread-count">{{ unread_notifications }}</span>{% endif %}</a>
+                <a class="dashboard-nav-link" href="{{ url_for('reviews') }}"><span aria-hidden="true">★</span>Reviews</a>
+                <a class="dashboard-nav-link" href="{{ url_for('privacy_page') }}"><span aria-hidden="true">⌑</span>Privacy</a>
+                <a class="dashboard-nav-link" href="{{ url_for('blocked_page') }}"><span aria-hidden="true">⊘</span>Blocked users</a>
+                {% if current_user.is_admin %}<a class="dashboard-nav-link" href="{{ url_for('admin_panel') }}"><span aria-hidden="true">⚙</span>Admin</a>{% endif %}
+                <form class="dashboard-logout" method="post" action="{{ url_for('logout') }}">
+                    <button class="dashboard-nav-link" type="submit"><span aria-hidden="true">↗</span>Logout</button>
+                </form>
+            </nav>
+        </aside>
+
+        <div class="dashboard-content">
+            <section class="dashboard-welcome" id="dashboard" aria-labelledby="dashboard-title">
+                <div>
+                    <p class="eyebrow">Your SkillSwap space</p>
+                    <h1 id="dashboard-title">Welcome, <em>{{ current_user.name }}</em></h1>
+                    <p>Here’s what’s happening in your skill-sharing community.</p>
+                </div>
+                <a class="button button-dark" href="{{ url_for('manage_skills') }}">Manage skills <span aria-hidden="true">↗</span></a>
+            </section>
+
+            <section class="dashboard-stats" aria-label="Your SkillSwap statistics">
+                <article class="dashboard-stat stat-mint"><span class="stat-symbol" aria-hidden="true">↗</span><p>Skills I Teach</p><strong>{{ skills_to_teach }}</strong></article>
+                <article class="dashboard-stat stat-yellow"><span class="stat-symbol" aria-hidden="true">＋</span><p>Skills I Want to Learn</p><strong>{{ skills_to_learn }}</strong></article>
+                <article class="dashboard-stat stat-coral"><span class="stat-symbol" aria-hidden="true">◷</span><p>Pending Requests</p><strong>{{ pending_requests }}</strong></article>
+                <article class="dashboard-stat stat-blue"><span class="stat-symbol" aria-hidden="true">⇄</span><p>Accepted Connections</p><strong>{{ accepted_connections }}</strong></article>
+                <article class="dashboard-stat stat-lilac"><span class="stat-symbol" aria-hidden="true">★</span><p>Average Rating</p><strong>{% if average_rating is not none %}{{ '%.1f'|format(average_rating) }}{% else %}—{% endif %}</strong><small>{% if review_count %}{{ review_count }} review{% if review_count != 1 %}s{% endif %}{% else %}No reviews yet{% endif %}</small></article>
+            </section>
+
+            <div class="dashboard-detail-grid">
+                <section class="dashboard-panel" id="profile" aria-labelledby="profile-title">
+                    <div class="dashboard-panel-heading"><div><p class="eyebrow">A little about you</p><h2 id="profile-title">My Profile</h2></div><span class="panel-mark" aria-hidden="true">◉</span></div>
+                    <dl class="profile-details">
+                        <div><dt>Name</dt><dd>{{ current_user.name }}</dd></div>
+                        <div><dt>Username</dt><dd>@{{ current_user.username }}</dd></div>
+                        <div><dt>Email</dt><dd>{{ current_user.email }}</dd></div>
+                        <div><dt>Location</dt><dd>{{ current_user.location or 'Not added yet' }}</dd></div>
+                        <div class="profile-bio"><dt>Bio</dt><dd>{{ current_user.bio or 'Add a short introduction to your profile.' }}</dd></div>
+                    </dl>
+                </section>
+
+                <section class="dashboard-panel" id="my-skills" aria-labelledby="my-skills-title">
+                    <div class="dashboard-panel-heading"><div><p class="eyebrow">Your knowledge exchange</p><h2 id="my-skills-title">My Skills</h2></div><span class="panel-mark" aria-hidden="true">✳</span></div>
+                    {% if user_skills %}
+                        <div class="my-skill-list">
+                            {% for user_skill in user_skills %}
+                                <div class="my-skill-row"><span class="my-skill-name">{{ user_skill.skill.name }}</span><span class="skill-type-badge skill-type-{{ user_skill.skill_type }}">{{ user_skill.skill_type|title }}</span></div>
+                            {% endfor %}
+                        </div>
+                    {% else %}
+                        <p class="dashboard-empty">Your skills will appear here when you add them to your profile.</p>
+                        <a class="dashboard-text-link" href="{{ url_for('find_skills') }}">Explore skills <span aria-hidden="true">↗</span></a>
+                    {% endif %}
+                </section>
+            </div>
+
+            <div class="dashboard-activity-grid">
+                <section class="dashboard-panel" id="matches" aria-labelledby="matches-title">
+                    <div class="dashboard-panel-heading"><div><p class="eyebrow">A good fit for what you know</p><h2 id="matches-title">Recommended Matches</h2></div><span class="panel-mark" aria-hidden="true">⇄</span></div>
+                    {% if recommended_matches %}
+                        <div class="match-list">
+                            {% for match in recommended_matches %}
+                                <article class="match-row">
+                                    <span class="match-avatar" aria-hidden="true">{{ match.user.name[:1]|upper }}</span>
+                                    <div class="match-person"><a class="match-profile-link" href="{{ url_for('user_profile', user_id=match.user.id) }}"><strong>{{ match.user.name }}</strong><span>@{{ match.user.username }}{% if match.user.location %} · {{ match.user.location }}{% endif %}</span></a><div class="match-skills">{% for skill_name in match.skills %}<span>{{ skill_name }}</span>{% endfor %}</div></div>
+                                    <span class="match-count">{{ match.skills|length }} match{% if match.skills|length != 1 %}es{% endif %}</span>
+                                </article>
+                            {% endfor %}
+                        </div>
+                    {% else %}
+                        <p class="dashboard-empty">Add skills you teach or want to learn to see people with complementary skills here.</p>
+                        <a class="dashboard-text-link" href="{{ url_for('home') }}#skills">Browse skills <span aria-hidden="true">↗</span></a>
+                    {% endif %}
+                </section>
+
+                <section class="dashboard-panel" id="upcoming-sessions" aria-labelledby="upcoming-sessions-title">
+                    <div class="dashboard-panel-heading"><div><p class="eyebrow">On your calendar</p><h2 id="upcoming-sessions-title">Upcoming sessions</h2></div><a class="dashboard-text-link" href="{{ url_for('session_center') }}">Manage <span aria-hidden="true">↗</span></a></div>
+                    {% if upcoming_sessions %}
+                        <div class="activity-list">{% for session in upcoming_sessions %}
+                            <article class="activity-row"><div class="activity-main"><strong>{{ session.title }}</strong><span>{{ session.skill.name }} · with {{ session.learner.name if session.teacher_id == current_user.id else session.teacher.name }}</span></div><div class="activity-meta"><time datetime="{{ session.date.isoformat() }}">{{ session.date.strftime('%b %d') }}</time><span>{{ session.start_time.strftime('%H:%M') }}</span></div></article>
+                        {% endfor %}</div>
+                    {% else %}<p class="dashboard-empty">Upcoming sessions will appear here after you schedule one from an accepted request.</p><a class="dashboard-text-link" href="{{ url_for('session_center') }}">Go to sessions <span aria-hidden="true">↗</span></a>{% endif %}
+                </section>
+
+                <section class="dashboard-panel" id="requests" aria-labelledby="requests-title">
+                    <div class="dashboard-panel-heading"><div><p class="eyebrow">Keep the exchange moving</p><h2 id="requests-title">Recent Requests</h2></div><a class="dashboard-text-link" href="{{ url_for('view_requests') }}">View all <span aria-hidden="true">↗</span></a></div>
+                    {% if recent_requests %}
+                        <div class="activity-list">
+                            {% for skill_request in recent_requests %}
+                                <article class="activity-row"><div class="activity-main"><strong>{{ skill_request.skill.name }}</strong><span>{% if skill_request.sender_id == current_user.id %}You sent a request to {{ skill_request.receiver.name }}{% else %}{{ skill_request.sender.name }} sent you a request{% endif %}</span></div><div class="activity-meta"><span class="activity-status status-{{ skill_request.status|lower|replace(' ', '-') }}">{{ skill_request.status|title }}</span><time datetime="{{ skill_request.created_at.isoformat() }}">{{ skill_request.created_at.strftime('%b %d') }}</time></div></article>
+                            {% endfor %}
+                        </div>
+                    {% else %}
+                        <p class="dashboard-empty">Skill requests you send or receive will show up here.</p>
+                    {% endif %}
+                </section>
+
+                <section class="dashboard-panel" id="messages" aria-labelledby="messages-title">
+                    <div class="dashboard-panel-heading"><div><p class="eyebrow">Conversations</p><h2 id="messages-title">Recent Messages</h2></div><a class="dashboard-text-link" href="{{ url_for('messages') }}">Open messages <span aria-hidden="true">↗</span></a></div>
+                    {% if recent_messages %}
+                        <div class="activity-list">
+                            {% for message in recent_messages %}
+                                <article class="activity-row message-row"><div class="activity-main"><strong>{% if message.sender_id == current_user.id %}You <span>to</span> {{ message.receiver.name }}{% else %}{{ message.sender.name }} <span>to you</span>{% endif %}</strong><span class="message-preview">{{ message.message|truncate(100, true) }}</span></div><time class="activity-date" datetime="{{ message.created_at.isoformat() }}">{{ message.created_at.strftime('%b %d') }}</time></article>
+                            {% endfor %}
+                        </div>
+                    {% else %}
+                        <p class="dashboard-empty">Your latest conversations will appear here.</p>
+                    {% endif %}
+                </section>
+
+                <section class="dashboard-panel" id="notifications" aria-labelledby="notifications-title">
+                    <div class="dashboard-panel-heading"><div><p class="eyebrow">Stay up to date</p><h2 id="notifications-title">Notifications</h2></div>{% if unread_notifications %}<span class="notification-count">{{ unread_notifications }} unread</span>{% endif %}</div>
+                    {% if recent_notifications %}
+                        <div class="activity-list">
+                            {% for notification in recent_notifications %}
+                                <article class="activity-row notification-row{% if not notification.is_read %} is-unread{% endif %}"><span class="notification-dot" aria-hidden="true"></span><div class="activity-main"><strong>{{ notification.type|replace('_', ' ')|title }}</strong><span>{{ notification.message }}</span></div><time class="activity-date" datetime="{{ notification.created_at.isoformat() }}">{{ notification.created_at.strftime('%b %d') }}</time></article>
+                            {% endfor %}
+                        </div>
+                    {% else %}
+                        <p class="dashboard-empty">You’re all caught up. New notifications will appear here.</p>
+                    {% endif %}
+                    <a class="dashboard-text-link notifications-view-all" href="{{ url_for('view_notifications') }}">View all notifications <span aria-hidden="true">↗</span></a>
+                </section>
+
+                <section class="dashboard-panel" id="reviews" aria-labelledby="reviews-title">
+                    <div class="dashboard-panel-heading"><div><p class="eyebrow">Feedback from your community</p><h2 id="reviews-title">Recent Reviews</h2></div><span class="panel-mark" aria-hidden="true">★</span></div>
+                    {% if recent_reviews %}
+                        <div class="activity-list">
+                            {% for review in recent_reviews %}
+                                <article class="activity-row review-row"><div class="activity-main"><strong>{{ review.reviewer.name }}</strong><span>{{ review.comment or 'Shared a rating with you.' }}</span></div><span class="review-rating" aria-label="{{ review.rating }} out of 5 stars">★ {{ review.rating }}/5</span></article>
+                            {% endfor %}
+                        </div>
+                    {% else %}
+                        <p class="dashboard-empty">Reviews from completed skill exchanges will appear here.</p>
+                    {% endif %}
+                </section>
+            </div>
+        </div>
+    </main>
+</body>
+</html>

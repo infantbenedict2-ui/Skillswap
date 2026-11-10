@@ -1,0 +1,4383 @@
+import os
+import re
+import json
+import hashlib
+import io
+import secrets
+import smtplib
+import tempfile
+import warnings
+from datetime import date, datetime, time, timedelta, timezone
+from functools import wraps
+from urllib.parse import urlsplit
+
+import click
+from flask import (
+    Flask,
+    abort,
+    current_app,
+    flash,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_file,
+    url_for,
+)
+from flask_login import LoginManager, current_user, login_required, login_user, logout_user
+from flask_migrate import Migrate
+from PIL import Image, UnidentifiedImageError
+from sqlalchemy import and_, event, func, inspect, or_, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError, IntegrityError, SQLAlchemyError
+from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.utils import secure_filename
+
+from models import (
+    ActivityLog,
+    BlockedUser,
+    Message,
+    Notification,
+    PasswordResetToken,
+    Report,
+    Review,
+    Skill,
+    SkillRequest,
+    SkillSession,
+    User,
+    UserSkill,
+    db,
+)
+from services.email_notifications import send_notification_email
+
+app = Flask(__name__)
+app.config["ENVIRONMENT"] = os.environ.get("SKILLSWAP_ENV", "development").strip().lower()
+if app.config["ENVIRONMENT"] not in {"development", "testing", "production"}:
+    raise RuntimeError(
+        "SKILLSWAP_ENV must be development, testing, or production."
+    )
+_production = app.config["ENVIRONMENT"] == "production"
+_database_url = (
+    os.environ.get("SKILLSWAP_DATABASE_URL")
+    or os.environ.get("DATABASE_URL")
+)
+_database_connect_args = {}
+if _database_url:
+    try:
+        _configured_database_url = make_url(_database_url)
+    except ArgumentError as error:
+        raise RuntimeError("The configured database URL is invalid.") from error
+    if _configured_database_url.get_backend_name() == "mysql":
+        if _configured_database_url.drivername not in {
+            "mysql",
+            "mysql+pymysql",
+        }:
+            raise RuntimeError(
+                "MySQL connections must use the supported PyMySQL driver."
+            )
+        _configured_database_url = _configured_database_url.set(
+            drivername="mysql+pymysql"
+        )
+        _database_url = _configured_database_url.render_as_string(
+            hide_password=False
+        )
+        _database_connect_args = {
+            "charset": "utf8mb4",
+            "init_command": "SET time_zone = '+00:00'",
+        }
+if _production:
+    if not _database_url:
+        raise RuntimeError(
+            "Production requires SKILLSWAP_DATABASE_URL or DATABASE_URL."
+        )
+    try:
+        _database_dialect = make_url(_database_url).get_backend_name()
+    except ArgumentError as error:
+        raise RuntimeError("The configured production database URL is invalid.") from error
+    if _database_dialect != "mysql":
+        raise RuntimeError(
+            "Production requires MySQL; SQLite is only supported for local development and tests."
+        )
+
+    _production_secret = os.environ.get("FLASK_SECRET_KEY", "")
+    if len(_production_secret.encode("utf-8")) < 32:
+        raise RuntimeError(
+            "Production requires a random FLASK_SECRET_KEY of at least 32 bytes."
+        )
+
+    _public_url = os.environ.get("SKILLSWAP_PUBLIC_URL", "").strip()
+    _public_url_parts = urlsplit(_public_url)
+    if (
+        _public_url_parts.scheme != "https"
+        or not _public_url_parts.netloc
+        or _public_url_parts.path not in {"", "/"}
+        or _public_url_parts.query
+        or _public_url_parts.fragment
+        or _public_url_parts.username
+        or _public_url_parts.password
+    ):
+        raise RuntimeError(
+            "Production requires SKILLSWAP_PUBLIC_URL to be a canonical HTTPS origin."
+        )
+    _production_hosts = {
+        host.strip().lower()
+        for host in os.environ.get("SKILLSWAP_TRUSTED_HOSTS", "").split(",")
+        if host.strip()
+    }
+    if not _production_hosts or _public_url_parts.netloc.lower() not in _production_hosts:
+        raise RuntimeError(
+            "Production requires SKILLSWAP_TRUSTED_HOSTS including the canonical public host."
+        )
+    if os.environ.get("SKILLSWAP_COOKIE_SECURE", "").strip().lower() != "true":
+        raise RuntimeError(
+            "Production requires SKILLSWAP_COOKIE_SECURE=true."
+        )
+    if os.environ.get("SKILLSWAP_SKIP_DATABASE_INIT", "").strip().lower() != "true":
+        raise RuntimeError(
+            "Production requires SKILLSWAP_SKIP_DATABASE_INIT=true; manage schema with Flask-Migrate."
+        )
+    if not os.environ.get("SKILLSWAP_ADMIN_EMAIL", "").strip():
+        raise RuntimeError(
+            "Production requires SKILLSWAP_ADMIN_EMAIL for explicit administrator provisioning."
+        )
+
+app.config["SQLALCHEMY_DATABASE_URI"] = (
+    _database_url
+    or "sqlite:///skillswap.db"
+)
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
+    "pool_pre_ping": True,
+    "pool_recycle": 1800,
+}
+if _database_connect_args:
+    app.config["SQLALCHEMY_ENGINE_OPTIONS"]["connect_args"] = (
+        _database_connect_args
+    )
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = _production or (
+    os.environ.get("SKILLSWAP_COOKIE_SECURE", "").strip().lower() == "true"
+)
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=12)
+app.config["SESSION_REFRESH_EACH_REQUEST"] = False
+app.config["PREFERRED_URL_SCHEME"] = "https" if _production else "http"
+if _production:
+    app.config["TRUSTED_HOSTS"] = sorted(_production_hosts)
+app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
+Image.MAX_IMAGE_PIXELS = 25_000_000
+os.makedirs(app.instance_path, exist_ok=True)
+_secret_path = os.path.join(app.instance_path, "secret_key")
+if os.environ.get("FLASK_SECRET_KEY"):
+    app.config["SECRET_KEY"] = os.environ["FLASK_SECRET_KEY"]
+elif _production:
+    raise RuntimeError("Production must not use a generated or persisted development secret.")
+elif os.path.exists(_secret_path):
+    with open(_secret_path, "rb") as secret_file:
+        app.config["SECRET_KEY"] = secret_file.read()
+else:
+    _generated_secret = os.urandom(32)
+    with open(_secret_path, "wb") as secret_file:
+        secret_file.write(_generated_secret)
+    app.config["SECRET_KEY"] = _generated_secret
+db.init_app(app)
+migrate = Migrate(app, db, compare_type=True, render_as_batch=True)
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = "login"
+login_manager.login_message = "Please log in to continue."
+login_manager.login_message_category = "info"
+
+
+@app.before_request
+def enforce_production_request_security():
+    if not _production:
+        return None
+
+    if request.host.lower() not in _production_hosts:
+        abort(400)
+
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        origin = request.headers.get("Origin")
+        if origin:
+            parsed_origin = urlsplit(origin)
+            origin_matches = (
+                parsed_origin.scheme == "https"
+                and parsed_origin.netloc.lower() in _production_hosts
+                and not parsed_origin.username
+                and not parsed_origin.password
+                and not parsed_origin.path
+                and not parsed_origin.query
+                and not parsed_origin.fragment
+            )
+        else:
+            referer = request.headers.get("Referer")
+            parsed_referer = urlsplit(referer) if referer else None
+            origin_matches = bool(
+                parsed_referer
+                and parsed_referer.scheme == "https"
+                and parsed_referer.netloc.lower() in _production_hosts
+                and not parsed_referer.username
+                and not parsed_referer.password
+            )
+        if not origin_matches:
+            abort(403)
+    return None
+
+
+@app.after_request
+def add_security_response_headers(response):
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()",
+    )
+    if _production:
+        response.headers.setdefault(
+            "Strict-Transport-Security",
+            "max-age=31536000; includeSubDomains",
+        )
+    return response
+
+
+@login_manager.user_loader
+def load_user(user_id):
+    try:
+        user = db.session.get(User, int(user_id))
+        return user if user is not None and user.is_active else None
+    except (TypeError, ValueError):
+        return None
+
+
+def admin_required(view_function):
+    @wraps(view_function)
+    @login_required
+    def wrapped_view(*args, **kwargs):
+        if not current_user.is_admin:
+            abort(403)
+        return view_function(*args, **kwargs)
+
+    return wrapped_view
+
+DEFAULT_SKILLS = [
+    "Python",
+    "Java",
+    "C",
+    "C++",
+    "JavaScript",
+    "HTML",
+    "CSS",
+    "SQL",
+    "Web Development",
+    "App Development",
+    "UI/UX Design",
+    "Graphic Design",
+    "Video Editing",
+    "Photography",
+    "Public Speaking",
+    "Communication",
+    "English",
+    "Mathematics",
+    "Data Structures",
+    "Machine Learning",
+    "Artificial Intelligence",
+    "Git",
+    "GitHub",
+    "Digital Marketing",
+    "Excel",
+    "PowerPoint",
+    "Music",
+    "Drawing",
+    "Cooking",
+    "Fitness",
+    "Cybersecurity",
+    "Cloud Computing",
+    "Data Science",
+    "Content Writing",
+]
+
+SKILL_CATEGORIES = {
+    "Programming": ["Python", "Java", "C", "C++", "JavaScript", "Data Structures"],
+    "Web Development": ["HTML", "CSS", "SQL", "Web Development", "App Development"],
+    "Design": ["UI/UX Design", "Graphic Design"],
+    "Business": ["Digital Marketing", "Excel", "PowerPoint"],
+    "Communication": ["Public Speaking", "Communication", "English"],
+    "Academic": ["Mathematics", "Machine Learning", "Artificial Intelligence", "Data Science"],
+    "Creative": ["Video Editing", "Photography", "Music", "Drawing", "Content Writing"],
+    "Technology": ["Git", "GitHub", "Cybersecurity", "Cloud Computing"],
+    "Lifestyle": ["Cooking", "Fitness"],
+}
+SKILL_CATEGORY_BY_NAME = {
+    skill_name: category
+    for category, skill_names in SKILL_CATEGORIES.items()
+    for skill_name in skill_names
+}
+
+
+def enable_sqlite_foreign_keys(connection, _connection_record):
+    cursor = connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
+
+def initialize_database():
+    os.makedirs(app.instance_path, exist_ok=True)
+    _ensure_upload_directories()
+
+    with app.app_context():
+        if (
+            db.engine.dialect.name == "sqlite"
+            and not event.contains(db.engine, "connect", enable_sqlite_foreign_keys)
+        ):
+            event.listen(db.engine, "connect", enable_sqlite_foreign_keys)
+        db.create_all()
+
+        user_skill_columns = {
+            column["name"] for column in inspect(db.engine).get_columns("user_skill")
+        }
+        for column_name in ("experience_level", "availability"):
+            if column_name not in user_skill_columns:
+                with db.engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            f"ALTER TABLE user_skill ADD COLUMN {column_name} "
+                            "VARCHAR(20)"
+                        )
+                    )
+
+        message_columns = {
+            column["name"] for column in inspect(db.engine).get_columns("message")
+        }
+        for column_name, column_definition in (
+            ("attachment_name", "VARCHAR(255)"),
+            ("attachment_path", "VARCHAR(255)"),
+            ("attachment_type", "VARCHAR(100)"),
+        ):
+            if column_name not in message_columns:
+                with db.engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            f"ALTER TABLE message ADD COLUMN {column_name} "
+                            f"{column_definition}"
+                        )
+                    )
+
+        user_columns = {
+            column["name"] for column in inspect(db.engine).get_columns("user")
+        }
+        user_migrations = {
+            "is_active": "BOOLEAN NOT NULL DEFAULT 1",
+            "profile_visibility": "VARCHAR(10) NOT NULL DEFAULT 'public'",
+            "location_visibility": "BOOLEAN NOT NULL DEFAULT 1",
+            "online_status_visibility": "BOOLEAN NOT NULL DEFAULT 1",
+            "notify_requests": "BOOLEAN NOT NULL DEFAULT 1",
+            "notify_messages": "BOOLEAN NOT NULL DEFAULT 1",
+            "notify_sessions": "BOOLEAN NOT NULL DEFAULT 1",
+            "notify_ratings": "BOOLEAN NOT NULL DEFAULT 1",
+        }
+        for column_name, column_definition in user_migrations.items():
+            if column_name not in user_columns:
+                with db.engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            f"ALTER TABLE user ADD COLUMN {column_name} "
+                            f"{column_definition}"
+                        )
+                    )
+
+        skill_columns = {
+            column["name"] for column in inspect(db.engine).get_columns("skill")
+        }
+        if "is_active" not in skill_columns:
+            with db.engine.begin() as connection:
+                connection.execute(
+                    text("ALTER TABLE skill ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT 1")
+                )
+
+        report_columns = {
+            column["name"] for column in inspect(db.engine).get_columns("user_report")
+        }
+        for column_name, column_definition in (
+            ("moderation_notes", "TEXT"),
+            ("moderator_id", "INTEGER"),
+            ("reviewed_at", "DATETIME"),
+        ):
+            if column_name not in report_columns:
+                with db.engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            f"ALTER TABLE user_report ADD COLUMN {column_name} "
+                            f"{column_definition}"
+                        )
+                    )
+        if "moderator_id" not in report_columns and db.engine.dialect.name != "sqlite":
+            with db.engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "ALTER TABLE user_report ADD CONSTRAINT "
+                        "fk_user_report_moderator_id FOREIGN KEY (moderator_id) "
+                        "REFERENCES user(id) ON DELETE SET NULL"
+                    )
+                )
+
+        review_columns = {
+            column["name"] for column in inspect(db.engine).get_columns("review")
+        }
+        if "skill_request_id" not in review_columns:
+            with db.engine.begin() as connection:
+                if db.engine.dialect.name == "sqlite":
+                    connection.execute(
+                        text(
+                            "ALTER TABLE review ADD COLUMN skill_request_id "
+                            "INTEGER REFERENCES skill_request(id) ON DELETE CASCADE"
+                        )
+                    )
+                else:
+                    connection.execute(
+                        text(
+                            "ALTER TABLE review ADD COLUMN skill_request_id "
+                            "INTEGER NULL"
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            "ALTER TABLE review ADD CONSTRAINT "
+                            "fk_review_skill_request_id FOREIGN KEY "
+                            "(skill_request_id) REFERENCES skill_request(id) "
+                            "ON DELETE CASCADE"
+                        )
+                    )
+
+        review_columns = {
+            column["name"] for column in inspect(db.engine).get_columns("review")
+        }
+        if "session_id" not in review_columns:
+            with db.engine.begin() as connection:
+                if db.engine.dialect.name == "sqlite":
+                    connection.execute(
+                        text(
+                            "ALTER TABLE review ADD COLUMN session_id "
+                            "INTEGER REFERENCES skill_session(id) ON DELETE CASCADE"
+                        )
+                    )
+                else:
+                    connection.execute(
+                        text("ALTER TABLE review ADD COLUMN session_id INTEGER NULL")
+                    )
+                    connection.execute(
+                        text(
+                            "ALTER TABLE review ADD CONSTRAINT "
+                            "fk_review_session_id FOREIGN KEY (session_id) "
+                            "REFERENCES skill_session(id) ON DELETE CASCADE"
+                        )
+                    )
+
+        notification_columns = {
+            column["name"] for column in inspect(db.engine).get_columns("notification")
+        }
+        if "title" not in notification_columns:
+            with db.engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "ALTER TABLE notification ADD COLUMN title "
+                        "VARCHAR(200) NOT NULL DEFAULT ''"
+                    )
+                )
+        if "related_entity_id" not in notification_columns:
+            with db.engine.begin() as connection:
+                connection.execute(
+                    text("ALTER TABLE notification ADD COLUMN related_entity_id INTEGER")
+                )
+        notification_indexes = {
+            index["name"]
+            for index in inspect(db.engine).get_indexes("notification")
+        }
+        if "ix_notification_user_read_created" not in notification_indexes:
+            next(
+                index
+                for index in Notification.__table__.indexes
+                if index.name == "ix_notification_user_read_created"
+            ).create(bind=db.engine, checkfirst=True)
+        with db.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE notification SET title = CASE type "
+                    "WHEN 'skill_request' THEN 'New skill-swap request' "
+                    "WHEN 'request_accepted' THEN 'Request accepted' "
+                    "WHEN 'request_rejected' THEN 'Request rejected' "
+                    "WHEN 'message' THEN 'New chat message' "
+                    "WHEN 'session_created' THEN 'New session scheduled' "
+                    "WHEN 'session_started' THEN 'Session started' "
+                    "WHEN 'session_updated' THEN 'Session updated' "
+                    "WHEN 'session_cancelled' THEN 'Session cancelled' "
+                    "WHEN 'session_completed' THEN 'Session completed' "
+                    "WHEN 'session_completion_confirmation' "
+                    "THEN 'Session completion confirmation' "
+                    "WHEN 'rating' THEN 'New rating received' "
+                    "ELSE 'SkillSwap notification' END "
+                    "WHERE title = ''"
+                )
+            )
+
+        review_indexes = {
+            index["name"] for index in inspect(db.engine).get_indexes("review")
+        }
+        for index_name in (
+            "uq_review_request_reviewer",
+            "uq_review_session_reviewer",
+        ):
+            if index_name in review_indexes:
+                continue
+            review_index = next(
+                index
+                for index in Review.__table__.indexes
+                if index.name == index_name
+            )
+            review_index.create(bind=db.engine, checkfirst=True)
+
+        existing_skills = {skill.name: skill for skill in Skill.query.all()}
+        new_skills = [
+            Skill(name=name, category=SKILL_CATEGORY_BY_NAME[name])
+            for name in DEFAULT_SKILLS
+            if name not in existing_skills
+        ]
+        db.session.add_all(new_skills)
+        for skill in existing_skills.values():
+            if not skill.category:
+                skill.category = SKILL_CATEGORY_BY_NAME.get(skill.name)
+
+        admin_email = (os.environ.get("SKILLSWAP_ADMIN_EMAIL") or "").strip().lower()
+        if admin_email:
+            designated_admin = User.query.filter(func.lower(User.email) == admin_email).first()
+            if designated_admin is not None and not designated_admin.is_admin:
+                designated_admin.is_admin = True
+        elif User.query.filter_by(is_admin=True).count() == 0:
+            if not _production:
+                first_user = User.query.order_by(User.id.asc()).first()
+                if first_user is not None:
+                    first_user.is_admin = True
+        db.session.commit()
+
+
+def _ensure_upload_directories():
+    upload_root = os.path.join(app.instance_path, "uploads")
+    for subdirectory in ("", "messages", "profile"):
+        directory = os.path.join(upload_root, subdirectory)
+        try:
+            os.makedirs(directory, exist_ok=True)
+            with tempfile.TemporaryFile(dir=directory):
+                pass
+        except OSError as error:
+            raise RuntimeError(
+                f"SkillSwap requires a writable upload directory: {directory}"
+            ) from error
+
+
+app.config["UPLOAD_FOLDER"] = os.path.join(app.instance_path, "uploads")
+
+
+@app.cli.command("init-db")
+def init_db_command():
+    """Create missing tables and apply the application's additive migrations."""
+    initialize_database()
+    print("SkillSwap database initialization completed.")
+
+
+@app.cli.command("db-check")
+def database_check_command():
+    """Run read-only connection checks against the explicitly configured database."""
+    engine = db.engine
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+            click.echo(f"Connection successful ({engine.dialect.name}+{engine.dialect.driver}).")
+            if engine.dialect.name == "mysql":
+                details = connection.execute(
+                    text(
+                        "SELECT VERSION(), @@character_set_connection, "
+                        "@@character_set_database, @@collation_database, "
+                        "@@time_zone, @@foreign_key_checks"
+                    )
+                ).one()
+                click.echo(f"MySQL server version: {details[0]}")
+                click.echo(f"Connection character set: {details[1]}")
+                click.echo(f"Database character set: {details[2]}")
+                click.echo(f"Database collation: {details[3]}")
+                click.echo(f"Connection time zone: {details[4]}")
+                if (
+                    not all(isinstance(value, str) for value in details[1:5])
+                    or details[1].lower() != "utf8mb4"
+                    or details[2].lower() != "utf8mb4"
+                    or not details[3].lower().startswith("utf8mb4_")
+                    or details[4].upper() not in {"UTC", "+00:00"}
+                    or details[5] != 1
+                ):
+                    raise click.ClickException(
+                        "MySQL settings must use utf8mb4 for the connection and "
+                        "database, a utf8mb4 collation, UTC session time, and "
+                        "enabled foreign-key checks."
+                    )
+    except SQLAlchemyError as error:
+        raise click.ClickException(
+            "Database connection or read-only verification failed. Check the "
+            "configured database URL, network access, database availability, "
+            "and account permissions."
+        ) from error
+
+
+@app.cli.command("promote-admin")
+def promote_admin_command():
+    """Promote the configured existing account to administrator."""
+    email = os.environ.get("SKILLSWAP_ADMIN_EMAIL", "").strip().lower()
+    if not email:
+        raise RuntimeError("Set SKILLSWAP_ADMIN_EMAIL before promoting an administrator.")
+    with app.app_context():
+        admin_user = User.query.filter(func.lower(User.email) == email).first()
+        if admin_user is None:
+            raise RuntimeError(
+                "No account matches SKILLSWAP_ADMIN_EMAIL; register that account first."
+            )
+        admin_user.is_admin = True
+        db.session.commit()
+    print("Configured SkillSwap administrator promoted.")
+
+
+_ensure_upload_directories()
+
+if os.environ.get("SKILLSWAP_SKIP_DATABASE_INIT", "").strip().lower() != "true":
+    initialize_database()
+
+
+def _log_admin_action(action, entity_type, entity_id=None, details=None):
+    db.session.add(
+        ActivityLog(
+            admin_id=current_user.id,
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            details=json.dumps(details, sort_keys=True) if details is not None else None,
+        )
+    )
+
+
+def _add_notification(
+    user_id,
+    message,
+    notification_type,
+    related_entity_id=None,
+    title=None,
+):
+    recipient = db.session.get(User, user_id)
+    if recipient is None:
+        raise ValueError(f"Cannot create notification for missing user {user_id}.")
+    preference_field = {
+        "skill_request": "notify_requests",
+        "request_accepted": "notify_requests",
+        "request_rejected": "notify_requests",
+        "request_cancelled": "notify_requests",
+        "request_completed": "notify_requests",
+        "message": "notify_messages",
+        "session_created": "notify_sessions",
+        "session_scheduled": "notify_sessions",
+        "session_updated": "notify_sessions",
+        "session_cancelled": "notify_sessions",
+        "session_started": "notify_sessions",
+        "session_completion_confirmation": "notify_sessions",
+        "session_completed": "notify_sessions",
+        "rating": "notify_ratings",
+        "rating_received": "notify_ratings",
+        "review": "notify_ratings",
+    }.get(notification_type)
+    if preference_field and not getattr(recipient, preference_field):
+        return
+    titles = {
+        "skill_request": "New skill-swap request",
+        "request_accepted": "Request accepted",
+        "request_rejected": "Request rejected",
+        "request_cancelled": "Request cancelled",
+        "message": "New chat message",
+        "session_created": "New session scheduled",
+        "session_scheduled": "New session scheduled",
+        "session_started": "Session started",
+        "session_updated": "Session updated",
+        "session_cancelled": "Session cancelled",
+        "session_completed": "Session completed",
+        "session_completion_confirmation": "Session completion confirmation",
+        "rating": "New rating received",
+        "rating_received": "New rating received",
+    }
+    db.session.add(
+        Notification(
+            user_id=user_id,
+            title=title or titles.get(notification_type, "SkillSwap notification"),
+            message=message,
+            type=notification_type,
+            related_entity_id=related_entity_id,
+        )
+    )
+
+
+def _sanitize_uploaded_image(uploaded_file):
+    formats = {
+        "PNG": ("png", "image/png"),
+        "JPEG": ("jpg", "image/jpeg"),
+        "WEBP": ("webp", "image/webp"),
+    }
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            uploaded_file.stream.seek(0)
+            with Image.open(uploaded_file.stream) as image:
+                image_format = image.format
+                image.verify()
+            if image_format not in formats:
+                raise ValueError("Upload a PNG, JPEG, or WebP image.")
+
+            uploaded_file.stream.seek(0)
+            with Image.open(uploaded_file.stream) as image:
+                image.load()
+                image.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
+                if image_format == "JPEG":
+                    image = image.convert("RGB")
+                output = io.BytesIO()
+                image.save(output, format=image_format, optimize=True)
+                return (*formats[image_format], output.getvalue())
+    except (
+        Image.DecompressionBombError,
+        Image.DecompressionBombWarning,
+        OSError,
+        UnidentifiedImageError,
+    ) as error:
+        raise ValueError("Upload a valid PNG, JPEG, or WebP image.") from error
+
+
+def _validated_uploaded_image(uploaded_file):
+    extension_map = {
+        ".png": ("png", "image/png"),
+        ".jpg": ("jpg", "image/jpeg"),
+        ".jpeg": ("jpg", "image/jpeg"),
+        ".webp": ("webp", "image/webp"),
+    }
+    original_name = secure_filename(uploaded_file.filename or "")
+    extension = os.path.splitext(original_name)[1].lower()
+    expected = extension_map.get(extension)
+    declared_type = (uploaded_file.mimetype or "").lower().split(";", 1)[0].strip()
+    if expected is None or declared_type != expected[1]:
+        raise ValueError("The image extension and MIME type must match PNG, JPEG, or WebP content.")
+    image_extension, image_type, content = _sanitize_uploaded_image(uploaded_file)
+    if image_extension != expected[0]:
+        raise ValueError("The image extension and MIME type do not match the image content.")
+    return image_extension, image_type, content
+
+
+def _safe_next_url():
+    target = request.values.get("next", "").strip()
+    if not target:
+        return None
+    parsed = urlsplit(target)
+    if parsed.scheme or parsed.netloc or not target.startswith("/"):
+        return None
+    return target
+
+
+def _redirect_after_login():
+    next_url = _safe_next_url()
+    return redirect(next_url or url_for("dashboard"))
+
+
+def _active_users():
+    return User.query.filter_by(is_active=True)
+
+
+def _users_are_blocked(first_user_id, second_user_id):
+    if first_user_id == second_user_id:
+        return False
+    return BlockedUser.query.filter(
+        or_(
+            and_(
+                BlockedUser.blocker_id == first_user_id,
+                BlockedUser.blocked_id == second_user_id,
+            ),
+            and_(
+                BlockedUser.blocker_id == second_user_id,
+                BlockedUser.blocked_id == first_user_id,
+            ),
+        )
+    ).first() is not None
+
+
+def _blocked_user_ids(user_id):
+    return {
+        row[0]
+        for row in BlockedUser.query.with_entities(BlockedUser.blocked_id).filter(
+            BlockedUser.blocker_id == user_id
+        ).all()
+    } | {
+        row[0]
+        for row in BlockedUser.query.with_entities(BlockedUser.blocker_id).filter(
+            BlockedUser.blocked_id == user_id
+        ).all()
+    }
+
+
+def _privacy_response(user):
+    return {
+        "profile_visibility": user.profile_visibility,
+        "location_visibility": user.location_visibility,
+        "online_status_visibility": user.online_status_visibility,
+        "notification_preferences": {
+            "requests": user.notify_requests,
+            "messages": user.notify_messages,
+            "sessions": user.notify_sessions,
+            "ratings": user.notify_ratings,
+        },
+    }
+
+
+def notification_href(notification):
+    if notification.type in {"message", "chat_message"}:
+        message = db.session.get(Message, notification.related_entity_id)
+        return url_for("messages", user_id=message.sender_id) if message else url_for("messages")
+    if notification.type in {
+        "session_created",
+        "session_scheduled",
+        "session_updated",
+        "session_cancelled",
+        "session_started",
+        "session_completion_confirmation",
+        "session_completed",
+    } and notification.related_entity_id:
+        return url_for("get_session", session_id=notification.related_entity_id)
+    if notification.type in {"rating", "rating_received"}:
+        return url_for("reviews")
+    if notification.type in {
+        "skill_request",
+        "request_accepted",
+        "request_rejected",
+        "request_cancelled",
+        "request_completed",
+    }:
+        return url_for("view_requests")
+    return url_for("view_notifications")
+
+
+@login_manager.unauthorized_handler
+def handle_unauthorized():
+    if request.path.startswith("/api/"):
+        return jsonify(error="Authentication required."), 401
+    return redirect(url_for("login", next=request.url))
+
+
+@app.context_processor
+def inject_template_helpers():
+    return {"notification_href": notification_href}
+
+
+@app.errorhandler(400)
+def handle_bad_request(error):
+    if _production and request.headers.get("Host", "").lower() not in _production_hosts:
+        return "Bad Request", 400
+    app.logger.info("Bad request for %s %s: %s", request.method, request.path, error)
+    return render_template("400.html"), 400
+
+
+@app.errorhandler(403)
+def handle_forbidden(error):
+    app.logger.info("Forbidden request for %s %s", request.method, request.path)
+    return render_template("403.html"), 403
+
+
+@app.errorhandler(404)
+def handle_not_found(error):
+    app.logger.info("Page or record not found: %s %s", request.method, request.path)
+    return render_template("404.html"), 404
+
+
+@app.errorhandler(SQLAlchemyError)
+def handle_database_error(error):
+    db.session.rollback()
+    app.logger.error(
+        "Database error while handling %s %s",
+        request.method,
+        request.path,
+        exc_info=(type(error), error, error.__traceback__),
+    )
+    if request.path.startswith("/api/"):
+        return jsonify(error="A database error occurred."), 500
+    return render_template("500.html"), 500
+
+
+@app.errorhandler(500)
+def handle_internal_error(error):
+    db.session.rollback()
+    original_error = getattr(error, "original_exception", None) or error
+    app.logger.error(
+        "Unexpected server error while handling %s %s",
+        request.method,
+        request.path,
+        exc_info=(type(original_error), original_error, original_error.__traceback__),
+    )
+    if request.path.startswith("/api/"):
+        return jsonify(error="An unexpected server error occurred."), 500
+    return render_template("500.html"), 500
+
+
+@app.route("/")
+def home():
+    skills = Skill.query.filter_by(is_active=True).order_by(Skill.name.asc()).all()
+    popular_skills = (
+        db.session.query(Skill, func.count(UserSkill.id).label("usage_count"))
+        .outerjoin(UserSkill, UserSkill.skill_id == Skill.id)
+        .filter(Skill.is_active.is_(True))
+        .group_by(Skill.id)
+        .order_by(func.count(UserSkill.id).desc(), Skill.name.asc())
+        .limit(8)
+        .all()
+    )
+    featured_categories = (
+        db.session.query(Skill.category, func.count(Skill.id))
+        .filter(Skill.is_active.is_(True), Skill.category.isnot(None))
+        .group_by(Skill.category)
+        .order_by(func.count(Skill.id).desc(), Skill.category.asc())
+        .limit(6)
+        .all()
+    )
+    return render_template(
+        "index.html",
+        catalog_skills=skills,
+        popular_skills=popular_skills,
+        featured_categories=featured_categories,
+    )
+
+
+@app.route("/favicon.ico")
+def favicon():
+    return redirect(url_for("static", filename="favicon.svg"))
+
+
+@app.route("/health")
+def health_check():
+    try:
+        db.session.execute(text("SELECT 1"))
+    except SQLAlchemyError:
+        db.session.rollback()
+        current_app.logger.exception("SkillSwap health check could not reach the database.")
+        return jsonify(status="unavailable"), 503
+    return jsonify(status="ok"), 200
+
+
+@app.route("/about")
+def about():
+    return render_template("about.html")
+
+
+def _password_reset_token(raw_token):
+    return PasswordResetToken.query.filter_by(
+        token_hash=hashlib.sha256(raw_token.encode("utf-8")).hexdigest(),
+        used_at=None,
+    ).first()
+
+
+def _password_reset_token_is_valid(reset_token):
+    if reset_token is None:
+        return False
+    expires_at = reset_token.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at > datetime.now(timezone.utc)
+
+
+@app.route("/forgot-password", methods=["GET", "POST"])
+def forgot_password():
+    if request.method == "POST":
+        email = request.form.get("email", "").strip().lower()
+        email_delivery_status = "not_requested"
+        if len(email) <= 255 and email:
+            public_url = os.environ.get("SKILLSWAP_PUBLIC_URL", "").rstrip("/")
+            public_url_parts = urlsplit(public_url)
+            valid_public_url = (
+                public_url_parts.scheme == "https"
+                and bool(public_url_parts.netloc)
+                and not public_url_parts.query
+                and not public_url_parts.fragment
+            )
+            email_enabled = (
+                os.environ.get("SKILLSWAP_EMAIL_ENABLED", "").lower() == "true"
+                and os.environ.get("SKILLSWAP_SMTP_HOST")
+                and os.environ.get("SKILLSWAP_EMAIL_FROM")
+                and valid_public_url
+            )
+            email_delivery_status = "configuration_missing"
+            if email_enabled:
+                email_delivery_status = "not_sent"
+            user = (
+                User.query.filter(
+                    func.lower(User.email) == email,
+                    User.is_active.is_(True),
+                ).first()
+                if email_enabled
+                else None
+            )
+            if user is not None:
+                now = datetime.now(timezone.utc)
+                PasswordResetToken.query.filter_by(
+                    user_id=user.id,
+                    used_at=None,
+                ).update({PasswordResetToken.used_at: now})
+                raw_token = secrets.token_urlsafe(32)
+                reset_token = PasswordResetToken(
+                    user_id=user.id,
+                    token_hash=hashlib.sha256(raw_token.encode("utf-8")).hexdigest(),
+                    expires_at=now + timedelta(hours=1),
+                )
+                db.session.add(reset_token)
+                db.session.commit()
+                reset_link = (
+                    f"{public_url}{url_for('reset_password', token=raw_token)}"
+                )
+                try:
+                    email_sent = send_notification_email(
+                        user.email,
+                        "Reset your SkillSwap password",
+                        (
+                            "Use this link within one hour to reset your SkillSwap "
+                            f"password: {reset_link}\n\nIf you did not request this, "
+                            "you can ignore this email."
+                        ),
+                    )
+                    if not email_sent:
+                        reset_token.used_at = datetime.now(timezone.utc)
+                        db.session.commit()
+                        email_delivery_status = "not_sent"
+                        current_app.logger.error(
+                            "Password reset email was not sent for user %s.",
+                            user.id,
+                        )
+                    else:
+                        email_delivery_status = "accepted"
+                        current_app.logger.info(
+                            "Password reset email accepted by SMTP server for user %s.",
+                            user.id,
+                        )
+                except (RuntimeError, OSError, smtplib.SMTPException) as error:
+                    current_app.logger.exception(
+                        "Password reset email delivery failed for user %s: %s",
+                        user.id,
+                        error,
+                    )
+                    reset_token.used_at = datetime.now(timezone.utc)
+                    db.session.commit()
+                    email_delivery_status = "not_sent"
+        if email_delivery_status == "configuration_missing":
+            flash(
+                "Password reset email is not configured; no reset email was sent.",
+                "error",
+            )
+        elif email_delivery_status in {"not_sent", "accepted"}:
+            flash(
+                "If an active account matches that address, a reset email request "
+                "was processed. Check your inbox; delivery failures are logged "
+                "without revealing whether an account exists.",
+                "info",
+            )
+        else:
+            flash(
+                "Enter a valid email address to request a reset link.",
+                "error",
+            )
+    return render_template("forgot_password.html")
+
+
+@app.route("/reset-password/<token>", methods=["GET", "POST"])
+def reset_password(token):
+    reset_token = _password_reset_token(token)
+    if not _password_reset_token_is_valid(reset_token):
+        return render_template("reset_password.html", invalid_token=True), 400
+
+    if request.method == "POST":
+        password = request.form.get("password", "")
+        confirm_password = request.form.get("confirm_password", "")
+        if len(password) < 8 or len(password) > 128:
+            flash("Use a password between 8 and 128 characters.", "error")
+        elif password != confirm_password:
+            flash("The password confirmation does not match.", "error")
+        else:
+            user = db.session.get(User, reset_token.user_id)
+            if user is None or not user.is_active:
+                abort(400)
+            now = datetime.now(timezone.utc)
+            user.password_hash = generate_password_hash(password)
+            PasswordResetToken.query.filter_by(
+                user_id=user.id,
+                used_at=None,
+            ).update({PasswordResetToken.used_at: now})
+            db.session.commit()
+            flash("Your password has been reset. You can now log in.", "success")
+            return redirect(url_for("login"))
+    return render_template("reset_password.html", invalid_token=False)
+
+
+@app.route("/find-skills")
+def find_skills():
+    search_term = request.args.get("q", "").strip()
+    category = request.args.get("category", "").strip()
+    location = request.args.get("location", "").strip()
+    experience_level = request.args.get("experience", "").strip()
+    availability = request.args.get("availability", "").strip()
+    try:
+        minimum_rating = float(request.args.get("min_rating", "0") or 0)
+    except ValueError:
+        abort(400)
+    if (
+        len(search_term) > 120
+        or len(category) > 80
+        or len(location) > 120
+        or experience_level not in {"", "beginner", "intermediate", "advanced"}
+        or availability not in {"", "weekdays", "weekends", "evenings", "flexible"}
+        or minimum_rating < 0
+        or minimum_rating > 5
+    ):
+        abort(400)
+
+    query = (
+        db.session.query(User, Skill, func.avg(Review.rating).label("average_rating"))
+        .join(UserSkill, UserSkill.user_id == User.id)
+        .join(Skill, Skill.id == UserSkill.skill_id)
+        .outerjoin(Review, Review.reviewed_user_id == User.id)
+        .filter(
+            UserSkill.skill_type == "teach",
+            User.is_active.is_(True),
+            User.profile_visibility == "public",
+            Skill.is_active.is_(True),
+        )
+    )
+    if current_user.is_authenticated:
+        query = query.filter(
+            User.id != current_user.id,
+            ~User.id.in_(_blocked_user_ids(current_user.id) or {-1}),
+        )
+    if search_term:
+        pattern = f"%{search_term}%"
+        query = query.filter(
+            or_(Skill.name.ilike(pattern), Skill.description.ilike(pattern))
+        )
+    if category:
+        query = query.filter(Skill.category == category)
+    if experience_level:
+        query = query.filter(UserSkill.experience_level == experience_level)
+    if availability:
+        query = query.filter(UserSkill.availability == availability)
+    if location:
+        query = query.filter(
+            User.location_visibility.is_(True),
+            User.location.ilike(f"%{location}%"),
+        )
+    query = query.group_by(User.id, Skill.id)
+    if minimum_rating:
+        query = query.having(func.avg(Review.rating) >= minimum_rating)
+    results = query.order_by(Skill.name.asc(), User.name.asc()).limit(100).all()
+    learning_skill_ids = set()
+    if current_user.is_authenticated:
+        learning_skill_ids = {
+            skill_id
+            for skill_id, in UserSkill.query.with_entities(UserSkill.skill_id).filter_by(
+                user_id=current_user.id,
+                skill_type="learn",
+            ).all()
+        }
+    return render_template(
+        "find_skills.html",
+        results=results,
+        search_term=search_term,
+        selected_category=category,
+        location=location,
+        experience_level=experience_level,
+        availability=availability,
+        minimum_rating=minimum_rating,
+        categories=sorted(
+            category_name
+            for category_name, in Skill.query.with_entities(Skill.category)
+            .filter(Skill.is_active.is_(True), Skill.category.isnot(None))
+            .distinct()
+            .all()
+        ),
+        learning_skill_ids=learning_skill_ids,
+    )
+
+
+@app.route("/skills/<int:skill_id>")
+def skill_detail(skill_id):
+    skill = Skill.query.filter_by(id=skill_id, is_active=True).first_or_404()
+    teachers = (
+        UserSkill.query.filter_by(skill_id=skill.id, skill_type="teach")
+        .join(UserSkill.user)
+        .filter(
+            User.is_active.is_(True),
+            User.profile_visibility == "public",
+        )
+        .order_by(User.name.asc())
+        .all()
+    )
+    if current_user.is_authenticated:
+        blocked_ids = _blocked_user_ids(current_user.id)
+        teachers = [
+            user_skill for user_skill in teachers
+            if user_skill.user_id != current_user.id
+            and user_skill.user_id not in blocked_ids
+        ]
+    return render_template("skill_detail.html", skill=skill, teachers=teachers)
+
+
+@app.route("/privacy")
+@login_required
+def privacy_page():
+    return render_template("privacy.html")
+
+
+@app.route("/blocked")
+@login_required
+def blocked_page():
+    return render_template("blocked.html")
+
+
+@app.route("/sessions")
+@login_required
+def session_center():
+    accepted_requests = SkillRequest.query.filter(
+        func.lower(SkillRequest.status) == "accepted",
+        or_(
+            SkillRequest.sender_id == current_user.id,
+            SkillRequest.receiver_id == current_user.id,
+        ),
+    ).order_by(SkillRequest.created_at.desc()).all()
+    return render_template("sessions.html", accepted_requests=accepted_requests)
+
+
+@app.route("/reports/new/<int:user_id>")
+@login_required
+def report_user_page(user_id):
+    reported_user = db.get_or_404(User, user_id)
+    if reported_user.id == current_user.id:
+        abort(400)
+    return render_template("report_user.html", reported_user=reported_user)
+
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if current_user.is_authenticated:
+        return redirect(url_for("dashboard"))
+
+    if request.method == "POST":
+        name = request.form.get("name", "").strip()
+        username = request.form.get("username", "").strip().lower()
+        email = request.form.get("email", "").strip().lower()
+        password = request.form.get("password", "")
+        confirm_password = request.form.get("confirm_password", "")
+        location = request.form.get("location", "").strip()
+        bio = request.form.get("bio", "").strip()
+
+        if not all((name, username, email, password, confirm_password)):
+            flash("Please complete all required fields.", "error")
+            return render_template("register.html")
+
+        if len(name) > 120 or len(username) > 80 or len(email) > 255 or len(location) > 120:
+            flash("One or more fields are longer than allowed.", "error")
+            return render_template("register.html")
+
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+            flash("Please enter a valid email address.", "error")
+            return render_template("register.html")
+
+        if password != confirm_password:
+            flash("Your passwords do not match.", "error")
+            return render_template("register.html")
+
+        if len(password) < 8:
+            flash("Please choose a password with at least 8 characters.", "error")
+            return render_template("register.html")
+
+        if User.query.filter(func.lower(User.username) == username).first():
+            flash("That username is already taken. Please choose another.", "error")
+            return render_template("register.html")
+
+        if User.query.filter(func.lower(User.email) == email).first():
+            flash("That email is already registered. Please use another.", "error")
+            return render_template("register.html")
+
+        user = User(
+            name=name,
+            username=username,
+            email=email,
+            password_hash=generate_password_hash(password),
+            location=location or None,
+            bio=bio or None,
+            is_admin=(
+                not _production
+                and User.query.filter_by(is_admin=True).count() == 0
+            ),
+        )
+        db.session.add(user)
+
+        try:
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            flash("That username or email is already registered.", "error")
+            return render_template("register.html")
+
+        login_user(user)
+        flash("Your account has been created. Welcome to SkillSwap.", "success")
+        return redirect(url_for("dashboard"))
+
+    return render_template("register.html")
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if current_user.is_authenticated:
+        return redirect(url_for("dashboard"))
+
+    if request.method == "POST":
+        identifier = request.form.get("identifier", "").strip().lower()
+        password = request.form.get("password", "")
+        user = User.query.filter(
+            or_(
+                func.lower(User.username) == identifier,
+                func.lower(User.email) == identifier,
+            )
+        ).first()
+
+        if user and check_password_hash(user.password_hash, password):
+            if login_user(user):
+                return _redirect_after_login()
+            flash("This account is disabled. Contact an administrator.", "error")
+        elif user and not user.is_active:
+            flash("This account is disabled. Contact an administrator.", "error")
+        else:
+            flash("Invalid username/email or password.", "error")
+
+    return render_template("login.html")
+
+
+@app.route("/logout", methods=["POST"])
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for("home"))
+
+
+@app.route("/dashboard")
+@login_required
+def dashboard():
+    user_id = current_user.id
+    today = datetime.now(timezone.utc).date()
+    current_time = datetime.now(timezone.utc).time().replace(tzinfo=None)
+    upcoming_sessions = (
+        SkillSession.query.filter(
+            or_(
+                SkillSession.teacher_id == user_id,
+                SkillSession.learner_id == user_id,
+            ),
+            SkillSession.status == "SCHEDULED",
+            or_(
+                SkillSession.date > today,
+                and_(
+                    SkillSession.date == today,
+                    SkillSession.start_time >= current_time,
+                ),
+            ),
+        )
+        .order_by(SkillSession.date.asc(), SkillSession.start_time.asc())
+        .limit(4)
+        .all()
+    )
+    user_skills = (
+        UserSkill.query.filter_by(user_id=user_id)
+        .join(Skill)
+        .order_by(Skill.name.asc())
+        .all()
+    )
+    skills_to_teach = sum(user_skill.skill_type == "teach" for user_skill in user_skills)
+    skills_to_learn = sum(user_skill.skill_type == "learn" for user_skill in user_skills)
+
+    related_requests = or_(
+        SkillRequest.sender_id == user_id,
+        SkillRequest.receiver_id == user_id,
+    )
+    pending_requests = SkillRequest.query.filter(
+        related_requests,
+        func.lower(SkillRequest.status) == "pending",
+    ).count()
+    accepted_pairs = SkillRequest.query.with_entities(
+        SkillRequest.sender_id,
+        SkillRequest.receiver_id,
+    ).filter(
+        related_requests,
+        func.lower(SkillRequest.status) == "accepted",
+    ).all()
+    accepted_connections = {
+        receiver_id if sender_id == user_id else sender_id
+        for sender_id, receiver_id in accepted_pairs
+    }
+    accepted_connections.discard(user_id)
+
+    review_query = Review.query.filter_by(reviewed_user_id=user_id)
+    review_count = review_query.count()
+    average_rating = db.session.query(func.avg(Review.rating)).filter(
+        Review.reviewed_user_id == user_id
+    ).scalar()
+    average_rating = round(float(average_rating), 1) if average_rating is not None else None
+
+    learning_skill_ids = {
+        user_skill.skill_id
+        for user_skill in user_skills
+        if user_skill.skill_type == "learn"
+    }
+    teaching_skill_ids = {
+        user_skill.skill_id
+        for user_skill in user_skills
+        if user_skill.skill_type == "teach"
+    }
+    match_conditions = []
+    if learning_skill_ids:
+        match_conditions.append(
+            and_(
+                UserSkill.skill_type == "teach",
+                UserSkill.skill_id.in_(learning_skill_ids),
+            )
+        )
+    if teaching_skill_ids:
+        match_conditions.append(
+            and_(
+                UserSkill.skill_type == "learn",
+                UserSkill.skill_id.in_(teaching_skill_ids),
+            )
+        )
+
+    match_groups = {}
+    if match_conditions:
+        match_rows = (
+            db.session.query(User, Skill.name)
+            .join(UserSkill, UserSkill.user_id == User.id)
+            .join(Skill, Skill.id == UserSkill.skill_id)
+            .filter(
+                User.id != user_id,
+                User.is_active.is_(True),
+                User.profile_visibility == "public",
+                Skill.is_active.is_(True),
+                ~User.id.in_(_blocked_user_ids(user_id) or {-1}),
+                or_(*match_conditions),
+            )
+            .all()
+        )
+        for matched_user, skill_name in match_rows:
+            match = match_groups.setdefault(
+                matched_user.id,
+                {"user": matched_user, "skills": set()},
+            )
+            match["skills"].add(skill_name)
+
+    recommended_matches = sorted(
+        (
+            {"user": match["user"], "skills": sorted(match["skills"])}
+            for match in match_groups.values()
+        ),
+        key=lambda match: (-len(match["skills"]), match["user"].name.lower()),
+    )[:4]
+
+    recent_requests = (
+        SkillRequest.query.filter(related_requests)
+        .order_by(SkillRequest.created_at.desc())
+        .limit(4)
+        .all()
+    )
+    blocked_ids = _blocked_user_ids(user_id)
+    recent_message_query = Message.query.filter(
+        or_(Message.sender_id == user_id, Message.receiver_id == user_id)
+    )
+    if blocked_ids:
+        recent_message_query = recent_message_query.filter(
+            ~Message.sender_id.in_(blocked_ids),
+            ~Message.receiver_id.in_(blocked_ids),
+        )
+    recent_messages = (
+        recent_message_query
+        .order_by(Message.created_at.desc())
+        .limit(4)
+        .all()
+    )
+    recent_notifications = (
+        Notification.query.filter_by(user_id=user_id)
+        .order_by(Notification.created_at.desc())
+        .limit(4)
+        .all()
+    )
+    unread_notifications = Notification.query.filter_by(
+        user_id=user_id,
+        is_read=False,
+    ).count()
+    recent_reviews = review_query.order_by(Review.created_at.desc()).limit(4).all()
+
+    return render_template(
+        "dashboard.html",
+        user_skills=user_skills,
+        skills_to_teach=skills_to_teach,
+        skills_to_learn=skills_to_learn,
+        pending_requests=pending_requests,
+        accepted_connections=len(accepted_connections),
+        average_rating=average_rating,
+        review_count=review_count,
+        recommended_matches=recommended_matches,
+        recent_requests=recent_requests,
+        recent_messages=recent_messages,
+        recent_notifications=recent_notifications,
+        unread_notifications=unread_notifications,
+        recent_reviews=recent_reviews,
+        upcoming_sessions=upcoming_sessions,
+    )
+
+
+def _admin_api_access_error():
+    if not current_user.is_authenticated:
+        return jsonify(error="Authentication required."), 401
+    if not current_user.is_admin:
+        return jsonify(error="Administrator access is required."), 403
+    return None
+
+
+def _admin_pagination(query):
+    try:
+        page = int(request.args.get("page", "1"))
+        per_page = int(request.args.get("per_page", "20"))
+    except ValueError:
+        return None, None, (jsonify(error="page and per_page must be integers."), 400)
+    if page < 1 or per_page < 1 or per_page > 100:
+        return None, None, (
+            jsonify(error="page must be positive and per_page must be between 1 and 100."),
+            400,
+        )
+    total = query.count()
+    items = (
+        query.offset((page - 1) * per_page)
+        .limit(per_page)
+        .all()
+    )
+    return (items, {
+        "page": page,
+        "per_page": per_page,
+        "total": total,
+        "pages": (total + per_page - 1) // per_page,
+    }, None)
+
+
+def _admin_user_response(user):
+    return {
+        "id": user.id,
+        "name": user.name,
+        "username": user.username,
+        "email": user.email,
+        "is_active": user.is_active,
+        "is_admin": user.is_admin,
+        "created_at": user.created_at.isoformat(),
+        "profile_url": url_for("user_profile", user_id=user.id),
+    }
+
+
+def _admin_dashboard_statistics():
+    average_rating = db.session.query(func.avg(Review.rating)).scalar()
+    return {
+        "total_users": User.query.count(),
+        "active_users": User.query.filter_by(is_active=True).count(),
+        "total_skills": Skill.query.count(),
+        "total_requests": SkillRequest.query.count(),
+        "pending_requests": SkillRequest.query.filter(
+            func.lower(SkillRequest.status) == "pending"
+        ).count(),
+        "accepted_requests": SkillRequest.query.filter(
+            func.lower(SkillRequest.status) == "accepted"
+        ).count(),
+        "rejected_requests": SkillRequest.query.filter(
+            func.lower(SkillRequest.status) == "rejected"
+        ).count(),
+        "cancelled_requests": SkillRequest.query.filter(
+            func.lower(SkillRequest.status) == "cancelled"
+        ).count(),
+        "completed_sessions": SkillSession.query.filter_by(status="COMPLETED").count(),
+        "scheduled_sessions": SkillSession.query.filter_by(status="SCHEDULED").count(),
+        "in_progress_sessions": SkillSession.query.filter_by(status="IN_PROGRESS").count(),
+        "cancelled_sessions": SkillSession.query.filter_by(status="CANCELLED").count(),
+        "total_ratings": Review.query.count(),
+        "average_platform_rating": (
+            round(float(average_rating), 2) if average_rating is not None else None
+        ),
+        "unresolved_reports": Report.query.filter(
+            Report.status.in_(("submitted", "under_review"))
+        ).count(),
+    }
+
+
+@app.route("/api/admin/dashboard", methods=["GET"])
+@login_required
+def api_admin_dashboard():
+    access_error = _admin_api_access_error()
+    if access_error:
+        return access_error
+    return jsonify(_admin_dashboard_statistics())
+
+
+@app.route("/api/admin/users", methods=["GET"])
+@login_required
+def api_admin_users():
+    access_error = _admin_api_access_error()
+    if access_error:
+        return access_error
+    query = User.query
+    search_term = request.args.get("search", "").strip()
+    if len(search_term) > 255:
+        return jsonify(error="Search must be 255 characters or fewer."), 400
+    if search_term:
+        pattern = f"%{search_term}%"
+        query = query.filter(or_(User.name.ilike(pattern), User.email.ilike(pattern)))
+    status_filter = request.args.get("status", "all")
+    if status_filter == "active":
+        query = query.filter_by(is_active=True)
+    elif status_filter == "inactive":
+        query = query.filter_by(is_active=False)
+    elif status_filter != "all":
+        return jsonify(error="status must be all, active, or inactive."), 400
+    query = query.order_by(User.created_at.desc())
+    items, pagination, error_response = _admin_pagination(query)
+    if error_response:
+        return error_response
+    return jsonify(
+        users=[_admin_user_response(user) for user in items],
+        pagination=pagination,
+    )
+
+
+@app.route("/api/admin/users/<int:user_id>", methods=["GET"])
+@login_required
+def api_admin_user_detail(user_id):
+    access_error = _admin_api_access_error()
+    if access_error:
+        return access_error
+    user = db.session.get(User, user_id)
+    if user is None:
+        return jsonify(error="User not found."), 404
+    data = _admin_user_response(user)
+    data["skills"] = [
+        {
+            "id": item.skill.id,
+            "name": item.skill.name,
+            "type": item.skill_type,
+        }
+        for item in UserSkill.query.filter_by(user_id=user.id)
+        .join(Skill)
+        .order_by(Skill.name.asc())
+        .all()
+    ]
+    data["request_count"] = SkillRequest.query.filter(
+        or_(SkillRequest.sender_id == user.id, SkillRequest.receiver_id == user.id)
+    ).count()
+    return jsonify(user=data)
+
+
+@app.route("/api/admin/users/<int:user_id>/status", methods=["PUT"])
+@login_required
+def api_admin_update_user_status(user_id):
+    access_error = _admin_api_access_error()
+    if access_error:
+        return access_error
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or set(body) != {"is_active"}:
+        return jsonify(error="A JSON object with only is_active is required."), 400
+    if not isinstance(body["is_active"], bool):
+        return jsonify(error="is_active must be a boolean."), 400
+    user = db.session.get(User, user_id)
+    if user is None:
+        return jsonify(error="User not found."), 404
+    if user.id == current_user.id and not body["is_active"]:
+        return jsonify(error="You cannot suspend your own administrator account."), 400
+    if (
+        user.is_admin
+        and user.is_active
+        and not body["is_active"]
+        and User.query.filter_by(is_admin=True, is_active=True).count() <= 1
+    ):
+        return jsonify(error="The last active administrator cannot be suspended."), 409
+    previous_status = user.is_active
+    user.is_active = body["is_active"]
+    _log_admin_action(
+        "user_status_changed",
+        "user",
+        user.id,
+        {"previous": previous_status, "is_active": user.is_active},
+    )
+    db.session.commit()
+    return jsonify(user=_admin_user_response(user))
+
+
+@app.route("/api/admin/skills", methods=["GET"])
+@login_required
+def api_admin_skills():
+    access_error = _admin_api_access_error()
+    if access_error:
+        return access_error
+    query = Skill.query
+    category = request.args.get("category")
+    if category:
+        query = query.filter_by(category=category)
+    active_filter = request.args.get("active", "all")
+    if active_filter == "true":
+        query = query.filter_by(is_active=True)
+    elif active_filter == "false":
+        query = query.filter_by(is_active=False)
+    elif active_filter != "all":
+        return jsonify(error="active must be all, true, or false."), 400
+    skills = query.order_by(Skill.category, Skill.name).all()
+    return jsonify(
+        skills=[
+            {
+                "id": skill.id,
+                "name": skill.name,
+                "category": skill.category,
+                "description": skill.description,
+                "is_active": skill.is_active,
+                "usage_count": UserSkill.query.filter_by(skill_id=skill.id).count(),
+                "request_count": SkillRequest.query.filter_by(skill_id=skill.id).count(),
+            }
+            for skill in skills
+        ]
+    )
+
+
+@app.route("/api/admin/requests", methods=["GET"])
+@login_required
+def api_admin_requests():
+    access_error = _admin_api_access_error()
+    if access_error:
+        return access_error
+    status_filter = request.args.get("status")
+    valid_statuses = {"pending", "accepted", "rejected", "cancelled", "completed"}
+    if status_filter and status_filter not in valid_statuses:
+        return jsonify(error="Invalid request status."), 400
+    query = SkillRequest.query
+    if status_filter:
+        query = query.filter(func.lower(SkillRequest.status) == status_filter)
+    query = query.order_by(SkillRequest.created_at.desc())
+    items, pagination, error_response = _admin_pagination(query)
+    if error_response:
+        return error_response
+    return jsonify(
+        requests=[
+            {
+                "id": item.id,
+                "skill": {"id": item.skill_id, "name": item.skill.name},
+                "sender": {"id": item.sender_id, "username": item.sender.username},
+                "receiver": {"id": item.receiver_id, "username": item.receiver.username},
+                "message": item.message,
+                "status": item.status,
+                "created_at": item.created_at.isoformat(),
+            }
+            for item in items
+        ],
+        pagination=pagination,
+    )
+
+
+@app.route("/api/admin/sessions", methods=["GET"])
+@login_required
+def api_admin_sessions():
+    access_error = _admin_api_access_error()
+    if access_error:
+        return access_error
+    status_filter = request.args.get("status")
+    valid_statuses = {"SCHEDULED", "IN_PROGRESS", "COMPLETED", "CANCELLED"}
+    if status_filter and status_filter not in valid_statuses:
+        return jsonify(error="Invalid session status."), 400
+    query = SkillSession.query
+    if status_filter:
+        query = query.filter_by(status=status_filter)
+    query = query.order_by(SkillSession.date.desc(), SkillSession.start_time.desc())
+    items, pagination, error_response = _admin_pagination(query)
+    if error_response:
+        return error_response
+    return jsonify(
+        sessions=[_session_response(item) for item in items],
+        pagination=pagination,
+    )
+
+
+@app.route("/api/admin/reports", methods=["GET"])
+@login_required
+def api_admin_reports():
+    access_error = _admin_api_access_error()
+    if access_error:
+        return access_error
+    status_filter = request.args.get("status")
+    if status_filter and status_filter not in REPORT_STATUSES:
+        return jsonify(error="Invalid report status."), 400
+    query = Report.query
+    if status_filter:
+        query = query.filter_by(status=status_filter)
+    query = query.order_by(Report.created_at.desc())
+    items, pagination, error_response = _admin_pagination(query)
+    if error_response:
+        return error_response
+    return jsonify(
+        reports=[_report_response(item) for item in items],
+        pagination=pagination,
+    )
+
+
+@app.route("/api/admin/reports/<int:report_id>/status", methods=["PUT"])
+@login_required
+def api_admin_update_report_status(report_id):
+    access_error = _admin_api_access_error()
+    if access_error:
+        return access_error
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or not set(body).issubset({"status", "moderation_notes"}) or "status" not in body:
+        return jsonify(error="Provide status and optional moderation_notes only."), 400
+    status = body["status"]
+    if not isinstance(status, str) or status not in {"under_review", "resolved", "rejected"}:
+        return jsonify(error="Status must be under_review, resolved, or rejected."), 400
+    notes = body.get("moderation_notes")
+    if notes is not None and (
+        not isinstance(notes, str) or len(notes.strip()) > 2000
+    ):
+        return jsonify(error="moderation_notes must be a string up to 2,000 characters."), 400
+    report = db.session.get(Report, report_id)
+    if report is None:
+        return jsonify(error="Report not found."), 404
+    report.status = status
+    if "moderation_notes" in body:
+        report.moderation_notes = notes.strip() or None if notes is not None else None
+    report.moderator_id = current_user.id
+    report.reviewed_at = datetime.now(timezone.utc)
+    _log_admin_action(
+        "report_status_changed",
+        "report",
+        report.id,
+        {"status": status, "moderation_notes": report.moderation_notes},
+    )
+    db.session.commit()
+    return jsonify(report=_report_response(report))
+
+
+@app.route("/api/admin/analytics", methods=["GET"])
+@login_required
+def api_admin_analytics():
+    access_error = _admin_api_access_error()
+    if access_error:
+        return access_error
+
+    current_month = datetime.now(timezone.utc).date().replace(day=1)
+    month_keys = []
+    year, month = current_month.year, current_month.month
+    for _ in range(12):
+        month_keys.append(f"{year:04d}-{month:02d}")
+        month -= 1
+        if month == 0:
+            year -= 1
+            month = 12
+    month_keys.reverse()
+    registrations = {key: 0 for key in month_keys}
+    for created_at, in User.query.with_entities(User.created_at).all():
+        month_key = created_at.strftime("%Y-%m")
+        if month_key in registrations:
+            registrations[month_key] += 1
+
+    swap_requests = {key: 0 for key in month_keys}
+    for created_at, in SkillRequest.query.with_entities(SkillRequest.created_at).all():
+        month_key = created_at.strftime("%Y-%m")
+        if month_key in swap_requests:
+            swap_requests[month_key] += 1
+
+    session_statuses = {
+        status: count
+        for status, count in db.session.query(
+            SkillSession.status,
+            func.count(SkillSession.id),
+        ).group_by(SkillSession.status).all()
+    }
+    popular_skills = (
+        db.session.query(
+            Skill.id,
+            Skill.name,
+            func.count(UserSkill.id),
+        )
+        .outerjoin(UserSkill, UserSkill.skill_id == Skill.id)
+        .group_by(Skill.id, Skill.name)
+        .order_by(func.count(UserSkill.id).desc(), Skill.name.asc())
+        .limit(10)
+        .all()
+    )
+    rating_distribution = {
+        str(stars): count
+        for stars, count in db.session.query(
+            Review.rating,
+            func.count(Review.id),
+        ).group_by(Review.rating).all()
+    }
+    return jsonify(
+        user_registrations=[
+            {"month": key, "count": registrations[key]} for key in month_keys
+        ],
+        monthly_swap_requests=[
+            {"month": key, "count": swap_requests[key]} for key in month_keys
+        ],
+        session_statuses={
+            status: session_statuses.get(status, 0)
+            for status in ("SCHEDULED", "IN_PROGRESS", "COMPLETED", "CANCELLED")
+        },
+        popular_skills=[
+            {"id": skill_id, "name": name, "usage_count": count}
+            for skill_id, name, count in popular_skills
+        ],
+        rating_distribution={
+            str(stars): rating_distribution.get(str(stars), 0)
+            for stars in range(1, 6)
+        },
+    )
+
+
+@app.route("/admin")
+@admin_required
+def admin_panel():
+    search_term = request.args.get("user_search", "").strip()
+    user_status = request.args.get("user_status", "all")
+    skill_category = request.args.get("skill_category", "")
+    report_status = request.args.get("report_status", "all")
+
+    users_query = User.query
+    if search_term:
+        search_pattern = f"%{search_term}%"
+        users_query = users_query.filter(
+            or_(
+                User.name.ilike(search_pattern),
+                User.email.ilike(search_pattern),
+            )
+        )
+    if user_status == "active":
+        users_query = users_query.filter_by(is_active=True)
+    elif user_status == "inactive":
+        users_query = users_query.filter_by(is_active=False)
+    elif user_status != "all":
+        abort(400)
+
+    skills_query = Skill.query
+    if skill_category:
+        skills_query = skills_query.filter_by(category=skill_category)
+    if report_status not in REPORT_STATUSES | {"all"}:
+        abort(400)
+    report_query = Report.query
+    if report_status != "all":
+        report_query = report_query.filter_by(status=report_status)
+    report_query = report_query.order_by(Report.created_at.desc())
+    sessions = SkillSession.query.order_by(
+        SkillSession.date.desc(),
+        SkillSession.start_time.desc(),
+    ).limit(25).all()
+    average_rating = db.session.query(func.avg(Review.rating)).scalar()
+    statistics = {
+        "total_users": User.query.count(),
+        "active_users": User.query.filter_by(is_active=True).count(),
+        "total_skills": Skill.query.count(),
+        "total_requests": SkillRequest.query.count(),
+        "pending_requests": SkillRequest.query.filter(
+            func.lower(SkillRequest.status) == "pending"
+        ).count(),
+        "accepted_requests": SkillRequest.query.filter(
+            func.lower(SkillRequest.status) == "accepted"
+        ).count(),
+        "rejected_requests": SkillRequest.query.filter(
+            func.lower(SkillRequest.status) == "rejected"
+        ).count(),
+        "cancelled_requests": SkillRequest.query.filter(
+            func.lower(SkillRequest.status) == "cancelled"
+        ).count(),
+        "completed_sessions": SkillSession.query.filter_by(status="COMPLETED").count(),
+        "scheduled_sessions": SkillSession.query.filter_by(status="SCHEDULED").count(),
+        "in_progress_sessions": SkillSession.query.filter_by(status="IN_PROGRESS").count(),
+        "cancelled_sessions": SkillSession.query.filter_by(status="CANCELLED").count(),
+        "total_ratings": Review.query.count(),
+        "average_platform_rating": (
+            round(float(average_rating), 2) if average_rating is not None else None
+        ),
+        "unresolved_reports": Report.query.filter(
+            Report.status.in_(("submitted", "under_review"))
+        ).count(),
+    }
+    skill_usage = {
+        skill.id: {
+            "members": UserSkill.query.filter_by(skill_id=skill.id).count(),
+            "requests": SkillRequest.query.filter_by(skill_id=skill.id).count(),
+        }
+        for skill in skills_query.all()
+    }
+    return render_template(
+        "admin.html",
+        **statistics,
+        total_messages=Message.query.count(),
+        total_reviews=Review.query.count(),
+        users=users_query.order_by(User.created_at.desc()).limit(200).all(),
+        user_search=search_term,
+        user_status=user_status,
+        skills=skills_query.order_by(Skill.category, Skill.name).all(),
+        skill_category=skill_category,
+        skill_requests=SkillRequest.query.order_by(
+            SkillRequest.created_at.desc()
+        ).limit(200).all(),
+        reports=report_query.limit(50).all(),
+        report_status=report_status,
+        sessions=sessions,
+        analytics=api_admin_analytics().get_json(),
+        skill_usage=skill_usage,
+        activity_logs=ActivityLog.query.order_by(
+            ActivityLog.created_at.desc()
+        ).limit(25).all(),
+        skill_categories=sorted(SKILL_CATEGORIES),
+        active_admin_count=User.query.filter_by(is_admin=True, is_active=True).count(),
+    )
+
+
+@app.route("/admin/skills/<int:skill_id>/toggle", methods=["POST"])
+@admin_required
+def admin_toggle_skill(skill_id):
+    skill = db.get_or_404(Skill, skill_id)
+    skill.is_active = not skill.is_active
+    _log_admin_action(
+        "skill_status_changed",
+        "skill",
+        skill.id,
+        {"is_active": skill.is_active},
+    )
+    db.session.commit()
+    flash(f"{skill.name} has been {'activated' if skill.is_active else 'deactivated'}.", "success")
+    return redirect(url_for("admin_panel") + "#skills")
+
+
+@app.route("/admin/reports/<int:report_id>/review", methods=["POST"])
+@admin_required
+def admin_review_report(report_id):
+    report = db.get_or_404(Report, report_id)
+    status = request.form.get("status", "")
+    notes = request.form.get("moderation_notes", "").strip()
+    if status not in {"under_review", "resolved", "rejected"} or len(notes) > 2000:
+        flash("Choose a valid report status and keep moderation notes under 2,000 characters.", "error")
+        return redirect(url_for("admin_panel") + "#reports")
+    report.status = status
+    report.moderation_notes = notes or None
+    report.moderator_id = current_user.id
+    report.reviewed_at = datetime.now(timezone.utc)
+    _log_admin_action(
+        "report_status_changed",
+        "report",
+        report.id,
+        {"status": status, "moderation_notes": report.moderation_notes},
+    )
+    db.session.commit()
+    flash("Report review saved.", "success")
+    return redirect(url_for("admin_panel") + "#reports")
+
+
+@app.route("/admin/users/<int:user_id>/toggle", methods=["POST"])
+@admin_required
+def admin_toggle_user(user_id):
+    user = db.get_or_404(User, user_id)
+    if user.id == current_user.id:
+        flash("You cannot disable your own administrator account.", "error")
+        return redirect(url_for("admin_panel"))
+    if (
+        user.is_admin
+        and user.is_active
+        and User.query.filter_by(is_admin=True, is_active=True).count() <= 1
+    ):
+        flash("The last active administrator cannot be disabled.", "error")
+        return redirect(url_for("admin_panel"))
+
+    old_status = user.is_active
+    user.is_active = not user.is_active
+    _log_admin_action(
+        "user_status_changed",
+        "user",
+        user.id,
+        {"is_active": user.is_active, "previous": old_status},
+    )
+    db.session.commit()
+    state = "enabled" if user.is_active else "disabled"
+    flash(f"{user.username} has been {state}.", "success")
+    return redirect(url_for("admin_panel"))
+
+
+@app.route("/admin/users/<int:user_id>/delete", methods=["POST"])
+@admin_required
+def admin_delete_user(user_id):
+    user = db.get_or_404(User, user_id)
+    if user.id == current_user.id:
+        flash("You cannot delete your own administrator account.", "error")
+        return redirect(url_for("admin_panel"))
+    if (
+        user.is_admin
+        and user.is_active
+        and User.query.filter_by(is_admin=True, is_active=True).count() <= 1
+    ):
+        flash("The last active administrator cannot be deleted.", "error")
+        return redirect(url_for("admin_panel"))
+
+    username = user.username
+    _log_admin_action("user_deleted", "user", user.id, {"username": username})
+    db.session.delete(user)
+    db.session.commit()
+    flash(f"{username} and their account data have been deleted.", "success")
+    return redirect(url_for("admin_panel"))
+
+
+@app.route("/admin/users/<int:user_id>/role", methods=["POST"])
+@admin_required
+def admin_toggle_role(user_id):
+    user = db.get_or_404(User, user_id)
+    if user.id == current_user.id:
+        flash("You cannot change your own administrator role.", "error")
+        return redirect(url_for("admin_panel"))
+    if (
+        user.is_admin
+        and user.is_active
+        and User.query.filter_by(is_admin=True, is_active=True).count() <= 1
+    ):
+        flash("The last active administrator cannot be demoted.", "error")
+        return redirect(url_for("admin_panel"))
+
+    user.is_admin = not user.is_admin
+    _log_admin_action(
+        "user_role_changed",
+        "user",
+        user.id,
+        {"is_admin": user.is_admin},
+    )
+    db.session.commit()
+    state = "an administrator" if user.is_admin else "a member"
+    flash(f"{user.username} is now {state}.", "success")
+    return redirect(url_for("admin_panel"))
+
+
+@app.route("/admin/skills", methods=["POST"])
+@admin_required
+def admin_add_skill():
+    name = request.form.get("name", "").strip()
+    category = request.form.get("category", "").strip()
+    description = request.form.get("description", "").strip()
+
+    if not name or len(name) > 120 or len(description) > 2000:
+        flash("Enter a skill name and keep fields within their length limits.", "error")
+        return redirect(url_for("admin_panel") + "#skills")
+    if category not in SKILL_CATEGORIES:
+        flash("Choose a category from the list.", "error")
+        return redirect(url_for("admin_panel") + "#skills")
+    if Skill.query.filter(func.lower(Skill.name) == name.lower()).first():
+        flash("A skill with that name already exists.", "error")
+        return redirect(url_for("admin_panel") + "#skills")
+
+    skill = Skill(name=name, category=category, description=description or None)
+    db.session.add(skill)
+    try:
+        db.session.flush()
+        _log_admin_action(
+            "skill_created",
+            "skill",
+            skill.id,
+            {"name": name, "category": category},
+        )
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        flash("A skill with that name already exists.", "error")
+        return redirect(url_for("admin_panel") + "#skills")
+
+    flash(f"{name} has been added to the skill catalog.", "success")
+    return redirect(url_for("admin_panel") + "#skills")
+
+
+@app.route("/admin/skills/<int:skill_id>/edit", methods=["POST"])
+@admin_required
+def admin_edit_skill(skill_id):
+    skill = db.get_or_404(Skill, skill_id)
+    name = request.form.get("name", "").strip()
+    category = request.form.get("category", "").strip()
+    description = request.form.get("description", "").strip()
+
+    if not name or len(name) > 120 or len(description) > 2000:
+        flash("Enter a skill name and keep fields within their length limits.", "error")
+        return redirect(url_for("admin_panel") + "#skills")
+    if category not in SKILL_CATEGORIES:
+        flash("Choose a category from the list.", "error")
+        return redirect(url_for("admin_panel") + "#skills")
+    duplicate = Skill.query.filter(
+        func.lower(Skill.name) == name.lower(),
+        Skill.id != skill.id,
+    ).first()
+    if duplicate:
+        flash("A skill with that name already exists.", "error")
+        return redirect(url_for("admin_panel") + "#skills")
+
+    skill.name = name
+    skill.category = category
+    skill.description = description or None
+    try:
+        _log_admin_action(
+            "skill_updated",
+            "skill",
+            skill.id,
+            {"name": name, "category": category},
+        )
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        flash("A skill with that name already exists.", "error")
+        return redirect(url_for("admin_panel") + "#skills")
+
+    flash(f"{name} has been updated.", "success")
+    return redirect(url_for("admin_panel") + "#skills")
+
+
+@app.route("/admin/skills/<int:skill_id>/delete", methods=["POST"])
+@admin_required
+def admin_delete_skill(skill_id):
+    skill = db.get_or_404(Skill, skill_id)
+    skill_name = skill.name
+    _log_admin_action("skill_deleted", "skill", skill.id, {"name": skill_name})
+    db.session.delete(skill)
+    db.session.commit()
+    flash(f"{skill_name} and its related skill records have been deleted.", "success")
+    return redirect(url_for("admin_panel") + "#skills")
+
+
+@app.route("/skills", methods=["GET", "POST"])
+@login_required
+def manage_skills():
+    if request.method == "POST":
+        action = request.form.get("action", "")
+
+        if action == "add":
+            try:
+                skill_id = int(request.form.get("skill_id", ""))
+            except ValueError:
+                flash("Choose a skill from the list.", "error")
+                return redirect(url_for("manage_skills"))
+
+            skill_type = request.form.get("skill_type", "")
+            if skill_type not in {"teach", "learn"}:
+                flash("Choose whether you can teach or want to learn this skill.", "error")
+                return redirect(url_for("manage_skills"))
+            experience_level = request.form.get("experience_level", "").strip()
+            availability = request.form.get("availability", "").strip()
+            if skill_type == "teach" and (
+                experience_level not in {"", "beginner", "intermediate", "advanced"}
+                or availability not in {"", "weekdays", "weekends", "evenings", "flexible"}
+            ):
+                flash("Choose valid teaching experience and availability values.", "error")
+                return redirect(url_for("manage_skills"))
+            if skill_type == "learn":
+                experience_level = ""
+                availability = ""
+
+            skill = db.session.get(Skill, skill_id)
+            if skill is None or not skill.is_active:
+                flash("That skill could not be found. Please choose another.", "error")
+                return redirect(url_for("manage_skills"))
+
+            existing_link = UserSkill.query.filter_by(
+                user_id=current_user.id,
+                skill_id=skill.id,
+                skill_type=skill_type,
+            ).first()
+            if existing_link:
+                flash(f"{skill.name} is already in your {skill_type} list.", "info")
+                return redirect(url_for("manage_skills"))
+
+            db.session.add(
+                UserSkill(
+                    user_id=current_user.id,
+                    skill_id=skill.id,
+                    skill_type=skill_type,
+                    experience_level=experience_level or None,
+                    availability=availability or None,
+                )
+            )
+            try:
+                db.session.commit()
+            except IntegrityError:
+                db.session.rollback()
+                flash(f"{skill.name} is already in your {skill_type} list.", "info")
+                return redirect(url_for("manage_skills"))
+
+            flash(f"{skill.name} added to your {skill_type} list.", "success")
+
+        elif action == "update":
+            try:
+                user_skill_id = int(request.form.get("user_skill_id", ""))
+            except ValueError:
+                flash("That teaching skill could not be found.", "error")
+                return redirect(url_for("manage_skills"))
+
+            user_skill = UserSkill.query.filter_by(
+                id=user_skill_id,
+                user_id=current_user.id,
+                skill_type="teach",
+            ).first()
+            if user_skill is None:
+                flash("That teaching skill could not be found.", "error")
+                return redirect(url_for("manage_skills"))
+
+            experience_level = request.form.get("experience_level", "").strip()
+            availability = request.form.get("availability", "").strip()
+            if (
+                experience_level not in {"", "beginner", "intermediate", "advanced"}
+                or availability not in {"", "weekdays", "weekends", "evenings", "flexible"}
+            ):
+                flash("Choose valid teaching experience and availability values.", "error")
+                return redirect(url_for("manage_skills"))
+
+            user_skill.experience_level = experience_level or None
+            user_skill.availability = availability or None
+            db.session.commit()
+            flash(f"{user_skill.skill.name} teaching details updated.", "success")
+
+        elif action == "remove":
+            try:
+                user_skill_id = int(request.form.get("user_skill_id", ""))
+            except ValueError:
+                flash("That skill entry could not be found.", "error")
+                return redirect(url_for("manage_skills"))
+
+            user_skill = UserSkill.query.filter_by(
+                id=user_skill_id,
+                user_id=current_user.id,
+            ).first()
+            if user_skill is None:
+                flash("That skill entry could not be found.", "error")
+                return redirect(url_for("manage_skills"))
+
+            skill_name = user_skill.skill.name
+            skill_type = user_skill.skill_type
+            db.session.delete(user_skill)
+            db.session.commit()
+            flash(f"{skill_name} removed from your {skill_type} list.", "success")
+
+        else:
+            flash("Choose a valid skill action.", "error")
+
+        return redirect(url_for("manage_skills"))
+
+    catalog = Skill.query.filter_by(is_active=True).order_by(
+        Skill.category,
+        Skill.name,
+    ).all()
+    skills_by_category = {}
+    for skill in catalog:
+        skills_by_category.setdefault(skill.category or "Other", []).append(skill)
+
+    user_skills = (
+        UserSkill.query.filter_by(user_id=current_user.id)
+        .join(Skill)
+        .order_by(Skill.category, Skill.name)
+        .all()
+    )
+    return render_template(
+        "skills.html",
+        skills_by_category=skills_by_category,
+        skills_to_teach=[item for item in user_skills if item.skill_type == "teach"],
+        skills_to_learn=[item for item in user_skills if item.skill_type == "learn"],
+    )
+
+
+@app.route("/matches")
+@login_required
+def matches():
+    learning_skills = (
+        UserSkill.query.filter_by(user_id=current_user.id, skill_type="learn")
+        .join(Skill)
+        .filter(Skill.is_active.is_(True))
+        .order_by(Skill.name.asc())
+        .all()
+    )
+    learning_skill_ids = {item.skill_id for item in learning_skills}
+    match_groups = {}
+
+    if learning_skill_ids:
+        match_rows = (
+            db.session.query(User, Skill)
+            .join(UserSkill, UserSkill.user_id == User.id)
+            .join(Skill, Skill.id == UserSkill.skill_id)
+            .filter(
+                User.id != current_user.id,
+                User.is_active.is_(True),
+                User.profile_visibility == "public",
+                Skill.is_active.is_(True),
+                ~User.id.in_(_blocked_user_ids(current_user.id) or {-1}),
+                UserSkill.skill_type == "teach",
+                UserSkill.skill_id.in_(learning_skill_ids),
+            )
+            .all()
+        )
+        for matched_user, skill in match_rows:
+            match = match_groups.setdefault(
+                matched_user.id,
+                {"user": matched_user, "skills": {}},
+            )
+            match["skills"][skill.id] = skill
+
+    matched_user_ids = list(match_groups)
+    average_ratings = {}
+    if matched_user_ids:
+        rating_rows = (
+            db.session.query(Review.reviewed_user_id, func.avg(Review.rating))
+            .filter(Review.reviewed_user_id.in_(matched_user_ids))
+            .group_by(Review.reviewed_user_id)
+            .all()
+        )
+        average_ratings = {
+            user_id: round(float(rating), 1)
+            for user_id, rating in rating_rows
+        }
+
+    learning_skill_count = len(learning_skill_ids)
+    matches = [
+        {
+            "user": match["user"],
+            "skills": sorted(match["skills"].values(), key=lambda skill: skill.name.lower()),
+            "match_percentage": round(len(match["skills"]) * 100 / learning_skill_count),
+            "average_rating": average_ratings.get(user_id),
+        }
+        for user_id, match in match_groups.items()
+    ]
+    matches.sort(
+        key=lambda match: (
+            -match["match_percentage"],
+            -(match["average_rating"] or 0),
+            match["user"].name.lower(),
+        )
+    )
+
+    return render_template(
+        "matches.html",
+        learning_skills=[item.skill for item in learning_skills],
+        matches=matches,
+    )
+
+
+@app.route("/requests/create", methods=["POST"])
+@login_required
+def create_skill_request():
+    try:
+        receiver_id = int(request.form.get("receiver_id", ""))
+        skill_id = int(request.form.get("skill_id", ""))
+    except ValueError:
+        flash("Choose a valid skill match.", "error")
+        return redirect(url_for("matches"))
+
+    message = request.form.get("message", "").strip()
+    if not message:
+        flash("Add a personal message before sending your request.", "error")
+        return redirect(url_for("matches"))
+    if len(message) > 1000:
+        flash("Keep your personal message under 1,000 characters.", "error")
+        return redirect(url_for("matches"))
+
+    receiver = db.session.get(User, receiver_id)
+    skill = db.session.get(Skill, skill_id)
+    if (
+        receiver is None
+        or skill is None
+        or not skill.is_active
+        or receiver.id == current_user.id
+        or not receiver.is_active
+    ):
+        flash("That skill match is no longer available.", "error")
+        return redirect(url_for("matches"))
+    if receiver.profile_visibility != "public" or _users_are_blocked(
+        current_user.id,
+        receiver.id,
+    ):
+        flash("That skill match is no longer available.", "error")
+        return redirect(url_for("matches"))
+
+    can_learn = UserSkill.query.filter_by(
+        user_id=current_user.id,
+        skill_id=skill.id,
+        skill_type="learn",
+    ).first()
+    can_teach = UserSkill.query.filter_by(
+        user_id=receiver.id,
+        skill_id=skill.id,
+        skill_type="teach",
+    ).first()
+    if not can_learn or not can_teach:
+        flash("That skill is no longer a match for your profile.", "error")
+        return redirect(url_for("matches"))
+
+    existing_request = SkillRequest.query.filter_by(
+        sender_id=current_user.id,
+        receiver_id=receiver.id,
+        skill_id=skill.id,
+    ).filter(func.lower(SkillRequest.status) == "pending").first()
+    if existing_request:
+        flash("You already have a pending request for this skill.", "info")
+        return redirect(url_for("matches"))
+
+    skill_request = SkillRequest(
+        sender_id=current_user.id,
+        receiver_id=receiver.id,
+        skill_id=skill.id,
+        message=message,
+    )
+    db.session.add(skill_request)
+    db.session.flush()
+    _add_notification(
+        receiver.id,
+        f"{current_user.name} sent you a request to learn {skill.name}.",
+        "skill_request",
+        related_entity_id=skill_request.id,
+    )
+    db.session.commit()
+    flash(f"Your request to learn {skill.name} has been sent.", "success")
+    return redirect(url_for("matches"))
+
+
+@app.route("/requests")
+@login_required
+def view_requests():
+    sent_requests = (
+        SkillRequest.query.filter_by(sender_id=current_user.id)
+        .order_by(SkillRequest.created_at.desc())
+        .all()
+    )
+    received_requests = (
+        SkillRequest.query.filter_by(receiver_id=current_user.id)
+        .order_by(SkillRequest.created_at.desc())
+        .all()
+    )
+    return render_template(
+        "requests.html",
+        sent_requests=sent_requests,
+        received_requests=received_requests,
+    )
+
+
+def _update_received_request(request_id, status):
+    skill_request = db.session.get(SkillRequest, request_id)
+    if skill_request is None or skill_request.receiver_id != current_user.id:
+        flash("You do not have permission to update that request.", "error")
+        return redirect(url_for("view_requests"))
+    if skill_request.status.lower() != "pending":
+        flash("Only pending requests can be updated.", "error")
+        return redirect(url_for("view_requests"))
+    if _users_are_blocked(skill_request.sender_id, skill_request.receiver_id):
+        flash("This request cannot be updated because one participant blocked the other.", "error")
+        return redirect(url_for("view_requests"))
+
+    skill_request.status = status
+    _add_notification(
+        skill_request.sender_id,
+        f"{current_user.name} {status} your request to learn {skill_request.skill.name}.",
+        f"request_{status}",
+        related_entity_id=skill_request.id,
+    )
+    db.session.commit()
+    flash(f"Request {status}.", "success")
+    return redirect(url_for("view_requests"))
+
+
+@app.route("/requests/<int:request_id>/accept", methods=["POST"])
+@login_required
+def accept_skill_request(request_id):
+    return _update_received_request(request_id, "accepted")
+
+
+@app.route("/requests/<int:request_id>/reject", methods=["POST"])
+@login_required
+def reject_skill_request(request_id):
+    return _update_received_request(request_id, "rejected")
+
+
+@app.route("/requests/<int:request_id>/cancel", methods=["POST"])
+@login_required
+def cancel_skill_request(request_id):
+    skill_request = db.session.get(SkillRequest, request_id)
+    if skill_request is None or skill_request.sender_id != current_user.id:
+        flash("You do not have permission to cancel that request.", "error")
+        return redirect(url_for("view_requests"))
+    if skill_request.status.lower() != "pending":
+        flash("Only pending requests can be cancelled.", "error")
+        return redirect(url_for("view_requests"))
+
+    skill_request.status = "cancelled"
+    _add_notification(
+        skill_request.receiver_id,
+        f"{current_user.name} cancelled the request to learn {skill_request.skill.name}.",
+        "request_cancelled",
+        related_entity_id=skill_request.id,
+    )
+    db.session.commit()
+    flash("Request cancelled.", "success")
+    return redirect(url_for("view_requests"))
+
+
+@app.route("/requests/<int:request_id>/complete", methods=["POST"])
+@login_required
+def complete_skill_request(request_id):
+    skill_request = db.session.get(SkillRequest, request_id)
+    if skill_request is None or current_user.id not in {
+        skill_request.sender_id,
+        skill_request.receiver_id,
+    }:
+        flash("You do not have permission to update that request.", "error")
+        return redirect(url_for("view_requests"))
+    if skill_request.status.lower() != "accepted":
+        flash("Only accepted requests can be marked complete.", "error")
+        return redirect(url_for("view_requests"))
+
+    skill_request.status = "completed"
+    other_user_id = (
+        skill_request.receiver_id
+        if current_user.id == skill_request.sender_id
+        else skill_request.sender_id
+    )
+    _add_notification(
+        other_user_id,
+        f"{current_user.name} marked your {skill_request.skill.name} exchange as completed.",
+        "request_completed",
+        related_entity_id=skill_request.id,
+    )
+    db.session.commit()
+    flash("Skill exchange marked as completed.", "success")
+    return redirect(url_for("view_requests"))
+
+
+def _get_connected_users(user_id):
+    connection_pairs = SkillRequest.query.with_entities(
+        SkillRequest.sender_id,
+        SkillRequest.receiver_id,
+    ).filter(
+        func.lower(SkillRequest.status).in_({"accepted", "completed"}),
+        or_(
+            SkillRequest.sender_id == user_id,
+            SkillRequest.receiver_id == user_id,
+        ),
+    ).all()
+    connected_user_ids = {
+        receiver_id if sender_id == user_id else sender_id
+        for sender_id, receiver_id in connection_pairs
+    }
+    connected_user_ids.discard(user_id)
+    connected_user_ids -= _blocked_user_ids(user_id)
+    if not connected_user_ids:
+        return []
+    return User.query.filter(User.id.in_(connected_user_ids)).order_by(User.name.asc()).all()
+
+
+def _users_are_connected(first_user_id, second_user_id):
+    if first_user_id == second_user_id or _users_are_blocked(
+        first_user_id,
+        second_user_id,
+    ):
+        return False
+    return SkillRequest.query.filter(
+        func.lower(SkillRequest.status).in_({"accepted", "completed"}),
+        or_(
+            and_(
+                SkillRequest.sender_id == first_user_id,
+                SkillRequest.receiver_id == second_user_id,
+            ),
+            and_(
+                SkillRequest.sender_id == second_user_id,
+                SkillRequest.receiver_id == first_user_id,
+            ),
+        ),
+    ).first() is not None
+
+
+def _session_response(skill_session):
+    return {
+        "id": skill_session.id,
+        "session_id": skill_session.id,
+        "skill": {
+            "id": skill_session.skill_id,
+            "name": skill_session.skill.name,
+        },
+        "skill_request_id": skill_session.skill_request_id,
+        "teacher": {
+            "id": skill_session.teacher_id,
+            "name": skill_session.teacher.name,
+        },
+        "learner": {
+            "id": skill_session.learner_id,
+            "name": skill_session.learner.name,
+        },
+        "title": skill_session.title,
+        "date": skill_session.date.isoformat(),
+        "start_time": skill_session.start_time.isoformat(),
+        "end_time": skill_session.end_time.isoformat(),
+        "notes": skill_session.notes,
+        "status": skill_session.status,
+        "teacher_confirmed": skill_session.teacher_confirmed,
+        "learner_confirmed": skill_session.learner_confirmed,
+        "created_at": skill_session.created_at.isoformat(),
+        "updated_at": skill_session.updated_at.isoformat(),
+    }
+
+
+def _session_participant_error(skill_session):
+    if current_user.id not in {
+        skill_session.teacher_id,
+        skill_session.learner_id,
+    }:
+        return jsonify(error="Only session participants can access this session."), 403
+    return None
+
+
+def _session_json_body():
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return None, (jsonify(error="A JSON object is required."), 400)
+    return body, None
+
+
+def _parse_session_date_time(date_value, start_value, end_value):
+    if not all(isinstance(value, str) for value in (date_value, start_value, end_value)):
+        raise ValueError("Date, start_time, and end_time must be ISO-formatted strings.")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_value):
+        raise ValueError("Date must use YYYY-MM-DD format.")
+    if not all(re.fullmatch(r"\d{2}:\d{2}(?::\d{2})?", value) for value in (start_value, end_value)):
+        raise ValueError("Times must use HH:MM or HH:MM:SS format.")
+    try:
+        session_date = date.fromisoformat(date_value)
+        start_time = time.fromisoformat(start_value)
+        end_time = time.fromisoformat(end_value)
+    except ValueError as error:
+        raise ValueError("Date and times must be valid ISO date/time values.") from error
+    if start_time.tzinfo is not None or end_time.tzinfo is not None:
+        raise ValueError("Times must not include a timezone.")
+    if start_time >= end_time:
+        raise ValueError("The end_time must be later than start_time.")
+    return session_date, start_time, end_time
+
+
+def _has_session_overlap(
+    teacher_id,
+    learner_id,
+    session_date,
+    start_time,
+    end_time,
+    exclude_session_id=None,
+):
+    participant_ids = {teacher_id, learner_id}
+    overlaps = SkillSession.query.filter(
+        SkillSession.date == session_date,
+        SkillSession.status.in_(("SCHEDULED", "IN_PROGRESS")),
+        SkillSession.start_time < end_time,
+        SkillSession.end_time > start_time,
+        or_(
+            SkillSession.teacher_id.in_(participant_ids),
+            SkillSession.learner_id.in_(participant_ids),
+        ),
+    )
+    if exclude_session_id is not None:
+        overlaps = overlaps.filter(SkillSession.id != exclude_session_id)
+    return overlaps.with_for_update().first() is not None
+
+
+def _session_for_update(session_id):
+    return SkillSession.query.filter_by(id=session_id).with_for_update().first()
+
+
+def _notify_session_participants(skill_session, message, notification_type, exclude_user_id=None):
+    for participant_id in (skill_session.teacher_id, skill_session.learner_id):
+        if participant_id != exclude_user_id:
+            _add_notification(
+                participant_id,
+                message,
+                notification_type,
+                related_entity_id=skill_session.id,
+            )
+
+
+def _rating_summary(query):
+    rating_count = query.count()
+    average_rating = query.with_entities(func.avg(Review.rating)).scalar()
+    distribution_rows = (
+        query.with_entities(Review.rating, func.count(Review.id))
+        .group_by(Review.rating)
+        .all()
+    )
+    distribution = {str(stars): 0 for stars in range(1, 6)}
+    distribution.update(
+        {str(stars): count for stars, count in distribution_rows}
+    )
+    return {
+        "average_rating": round(float(average_rating), 2) if average_rating is not None else None,
+        "rating_count": rating_count,
+        "rating_distribution": distribution,
+    }
+
+
+def _rating_response(rating):
+    return {
+        "id": rating.id,
+        "session_id": rating.session_id,
+        "reviewer": {
+            "id": rating.reviewer_id,
+            "name": rating.reviewer.name,
+        },
+        "reviewed_user": {
+            "id": rating.reviewed_user_id,
+            "name": rating.reviewed_user.name,
+        },
+        "rating": rating.rating,
+        "comment": rating.comment,
+        "created_at": rating.created_at.isoformat(),
+    }
+
+
+@app.route("/api/ratings", methods=["POST"])
+@login_required
+def create_rating():
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify(error="A JSON object is required."), 400
+    if set(body) - {"session_id", "rating", "comment"}:
+        return jsonify(error="Only session_id, rating, and comment can be provided."), 400
+    session_id = body.get("session_id")
+    if isinstance(session_id, bool) or not isinstance(session_id, int):
+        return jsonify(error="session_id must be an integer."), 400
+    rating_value = body.get("rating")
+    if isinstance(rating_value, bool) or not isinstance(rating_value, int):
+        return jsonify(error="Rating must be a whole number from 1 to 5."), 400
+    if rating_value < 1 or rating_value > 5:
+        return jsonify(error="Rating must be from 1 to 5 stars."), 400
+    comment = body.get("comment")
+    if comment is not None and not isinstance(comment, str):
+        return jsonify(error="Comment must be a string or null."), 400
+    if comment is not None and len(comment.strip()) > 1000:
+        return jsonify(error="Keep the comment under 1,000 characters."), 400
+
+    skill_session = SkillSession.query.filter_by(id=session_id).with_for_update().first()
+    if skill_session is None:
+        return jsonify(error="Session not found."), 404
+    if current_user.id not in {skill_session.teacher_id, skill_session.learner_id}:
+        return jsonify(error="Only session participants can submit a rating."), 403
+    if skill_session.status != "COMPLETED":
+        return jsonify(error="Ratings are allowed only after session completion."), 409
+
+    reviewed_user_id = (
+        skill_session.learner_id
+        if current_user.id == skill_session.teacher_id
+        else skill_session.teacher_id
+    )
+    existing_rating = Review.query.filter_by(
+        session_id=skill_session.id,
+        reviewer_id=current_user.id,
+    ).first()
+    if existing_rating is not None:
+        return jsonify(error="You have already rated this session participant."), 409
+
+    new_rating = Review(
+        session_id=skill_session.id,
+        reviewer_id=current_user.id,
+        reviewed_user_id=reviewed_user_id,
+        rating=rating_value,
+        comment=comment.strip() or None if comment is not None else None,
+    )
+    db.session.add(new_rating)
+    db.session.flush()
+    _add_notification(
+        reviewed_user_id,
+        f"{current_user.name} rated your completed session {rating_value} out of 5 stars.",
+        "rating",
+        related_entity_id=new_rating.id,
+    )
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify(error="You have already rated this session participant."), 409
+    return jsonify(rating=_rating_response(new_rating)), 201
+
+
+@app.route("/api/ratings/user/<int:user_id>", methods=["GET"])
+@login_required
+def get_user_ratings(user_id):
+    rated_user = db.session.get(User, user_id)
+    if rated_user is None or (
+        not rated_user.is_active
+        and current_user.id != rated_user.id
+        and not current_user.is_admin
+    ) or (
+        rated_user is not None
+        and rated_user.profile_visibility != "public"
+        and current_user.id != rated_user.id
+        and not current_user.is_admin
+    ) or (
+        rated_user is not None
+        and current_user.id != rated_user.id
+        and _users_are_blocked(current_user.id, rated_user.id)
+    ):
+        return jsonify(error="User not found."), 404
+
+    ratings_query = Review.query.filter_by(reviewed_user_id=user_id)
+    return jsonify(
+        user={"id": rated_user.id, "name": rated_user.name},
+        **_rating_summary(ratings_query),
+        ratings=[
+            _rating_response(rating)
+            for rating in ratings_query.order_by(Review.created_at.desc()).all()
+        ],
+    )
+
+
+@app.route("/api/ratings/session/<int:session_id>", methods=["GET"])
+@login_required
+def get_session_ratings(session_id):
+    skill_session = db.session.get(SkillSession, session_id)
+    if skill_session is None:
+        return jsonify(error="Session not found."), 404
+    if current_user.id not in {skill_session.teacher_id, skill_session.learner_id}:
+        return jsonify(error="Only session participants can view its ratings."), 403
+
+    ratings_query = Review.query.filter_by(session_id=session_id)
+    return jsonify(
+        session_id=session_id,
+        **_rating_summary(ratings_query),
+        ratings=[
+            _rating_response(rating)
+            for rating in ratings_query.order_by(Review.created_at.asc()).all()
+        ],
+    )
+
+
+@app.route("/api/ratings/me", methods=["GET"])
+@login_required
+def get_my_ratings():
+    received_query = Review.query.filter_by(reviewed_user_id=current_user.id)
+    given_query = Review.query.filter_by(reviewer_id=current_user.id)
+    return jsonify(
+        user={"id": current_user.id, "name": current_user.name},
+        received={
+            **_rating_summary(received_query),
+            "ratings": [
+                _rating_response(rating)
+                for rating in received_query.order_by(Review.created_at.desc()).all()
+            ],
+        },
+        given=[
+            _rating_response(rating)
+            for rating in given_query.order_by(Review.created_at.desc()).all()
+        ],
+    )
+
+
+@app.route("/api/sessions", methods=["POST"])
+@login_required
+def create_session():
+    body, error_response = _session_json_body()
+    if error_response:
+        return error_response
+    allowed_fields = {
+        "skill_request_id",
+        "teacher_id",
+        "learner_id",
+        "title",
+        "date",
+        "start_time",
+        "end_time",
+        "notes",
+    }
+    if set(body) - allowed_fields:
+        return jsonify(error="Only accepted request participants and session details can be provided."), 400
+
+    try:
+        skill_request_id = int(body.get("skill_request_id"))
+        teacher_id = int(body.get("teacher_id"))
+        learner_id = int(body.get("learner_id"))
+    except (TypeError, ValueError):
+        return jsonify(error="skill_request_id, teacher_id, and learner_id are required integers."), 400
+
+    title = body.get("title")
+    notes = body.get("notes")
+    if not isinstance(title, str) or not title.strip() or len(title.strip()) > 200:
+        return jsonify(error="Title is required and must be at most 200 characters."), 400
+    if notes is not None and not isinstance(notes, str):
+        return jsonify(error="Notes must be a string or null."), 400
+
+    try:
+        session_date, start_time, end_time = _parse_session_date_time(
+            body.get("date"),
+            body.get("start_time"),
+            body.get("end_time"),
+        )
+    except ValueError as error:
+        return jsonify(error=str(error)), 400
+
+    skill_request = (
+        SkillRequest.query.filter_by(id=skill_request_id).with_for_update().first()
+    )
+    teacher = db.session.get(User, teacher_id)
+    learner = db.session.get(User, learner_id)
+    if (
+        skill_request is None
+        or skill_request.status.lower() != "accepted"
+        or teacher_id == learner_id
+        or skill_request.receiver_id != teacher_id
+        or skill_request.sender_id != learner_id
+        or current_user.id not in {teacher_id, learner_id}
+        or teacher is None
+        or learner is None
+        or not teacher.is_active
+        or not learner.is_active
+    ):
+        return jsonify(error="An accepted request between these participants is required."), 403
+    if _users_are_blocked(teacher_id, learner_id):
+        return jsonify(error="A session cannot be scheduled while a participant has blocked the other."), 403
+
+    User.query.filter(User.id.in_(sorted((teacher_id, learner_id)))).order_by(
+        User.id.asc()
+    ).with_for_update().all()
+    if _has_session_overlap(
+        teacher_id,
+        learner_id,
+        session_date,
+        start_time,
+        end_time,
+    ):
+        return jsonify(error="A participant already has an overlapping session."), 409
+
+    skill_session = SkillSession(
+        skill_request_id=skill_request.id,
+        skill_id=skill_request.skill_id,
+        teacher_id=teacher_id,
+        learner_id=learner_id,
+        title=title.strip(),
+        date=session_date,
+        start_time=start_time,
+        end_time=end_time,
+        notes=notes.strip() if notes else None,
+    )
+    db.session.add(skill_session)
+    db.session.flush()
+    other_user_id = learner_id if current_user.id == teacher_id else teacher_id
+    _add_notification(
+        other_user_id,
+        f"{current_user.name} scheduled a {skill_session.skill.name} session: {skill_session.title}.",
+        "session_created",
+        related_entity_id=skill_session.id,
+    )
+    db.session.commit()
+    return jsonify(session=_session_response(skill_session)), 201
+
+
+@app.route("/api/sessions", methods=["GET"])
+@login_required
+def list_sessions():
+    filter_name = request.args.get("filter", "upcoming").strip().lower()
+    try:
+        page = int(request.args.get("page", "1"))
+        per_page = int(request.args.get("per_page", "20"))
+    except ValueError:
+        return jsonify(error="page and per_page must be integers."), 400
+    if page < 1 or per_page < 1 or per_page > 100:
+        return jsonify(error="page must be positive and per_page must be between 1 and 100."), 400
+
+    query = SkillSession.query.filter(
+        or_(
+            SkillSession.teacher_id == current_user.id,
+            SkillSession.learner_id == current_user.id,
+        )
+    )
+    if filter_name == "upcoming":
+        today = datetime.now(timezone.utc).date()
+        current_time = datetime.now(timezone.utc).time().replace(tzinfo=None)
+        query = query.filter(
+            SkillSession.status == "SCHEDULED",
+            or_(
+                SkillSession.date > today,
+                and_(
+                    SkillSession.date == today,
+                    SkillSession.start_time >= current_time,
+                ),
+            ),
+        )
+    elif filter_name in {"completed", "cancelled", "in_progress"}:
+        status_name = {
+            "completed": "COMPLETED",
+            "cancelled": "CANCELLED",
+            "in_progress": "IN_PROGRESS",
+        }[filter_name]
+        query = query.filter(SkillSession.status == status_name)
+    else:
+        return jsonify(error="filter must be upcoming, completed, cancelled, or in_progress."), 400
+
+    total = query.count()
+    sessions = (
+        query.order_by(
+            SkillSession.date.asc(),
+            SkillSession.start_time.asc(),
+            SkillSession.id.asc(),
+        )
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+        .all()
+    )
+    return jsonify(
+        sessions=[_session_response(item) for item in sessions],
+        pagination={
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "pages": (total + per_page - 1) // per_page,
+        },
+    )
+
+
+@app.route("/api/sessions/<int:session_id>", methods=["GET"])
+@login_required
+def get_session(session_id):
+    skill_session = db.session.get(SkillSession, session_id)
+    if skill_session is None:
+        return jsonify(error="Session not found."), 404
+    participant_error = _session_participant_error(skill_session)
+    if participant_error:
+        return participant_error
+    return jsonify(session=_session_response(skill_session))
+
+
+@app.route("/api/sessions/<int:session_id>", methods=["PUT"])
+@login_required
+def update_session(session_id):
+    skill_session = _session_for_update(session_id)
+    if skill_session is None:
+        return jsonify(error="Session not found."), 404
+    participant_error = _session_participant_error(skill_session)
+    if participant_error:
+        return participant_error
+    if skill_session.status != "SCHEDULED":
+        return jsonify(error="Only scheduled sessions can be edited."), 409
+
+    body, error_response = _session_json_body()
+    if error_response:
+        return error_response
+    allowed_fields = {"date", "start_time", "end_time", "notes"}
+    if not body or set(body) - allowed_fields:
+        return jsonify(error="Update date, start_time, end_time, and/or notes only."), 400
+
+    try:
+        session_date, start_time, end_time = _parse_session_date_time(
+            body.get("date", skill_session.date.isoformat()),
+            body.get("start_time", skill_session.start_time.isoformat()),
+            body.get("end_time", skill_session.end_time.isoformat()),
+        )
+    except ValueError as error:
+        return jsonify(error=str(error)), 400
+    if "notes" in body and body["notes"] is not None and not isinstance(body["notes"], str):
+        return jsonify(error="Notes must be a string or null."), 400
+    if _has_session_overlap(
+        skill_session.teacher_id,
+        skill_session.learner_id,
+        session_date,
+        start_time,
+        end_time,
+        exclude_session_id=skill_session.id,
+    ):
+        return jsonify(error="A participant already has an overlapping session."), 409
+
+    skill_session.date = session_date
+    skill_session.start_time = start_time
+    skill_session.end_time = end_time
+    if "notes" in body:
+        skill_session.notes = body["notes"].strip() if body["notes"] else None
+    other_user_id = (
+        skill_session.learner_id
+        if current_user.id == skill_session.teacher_id
+        else skill_session.teacher_id
+    )
+    _add_notification(
+        other_user_id,
+        f"{current_user.name} updated the {skill_session.skill.name} session: {skill_session.title}.",
+        "session_updated",
+        related_entity_id=skill_session.id,
+    )
+    db.session.commit()
+    return jsonify(session=_session_response(skill_session))
+
+
+@app.route("/api/sessions/<int:session_id>/start", methods=["POST"])
+@login_required
+def start_session(session_id):
+    skill_session = _session_for_update(session_id)
+    if skill_session is None:
+        return jsonify(error="Session not found."), 404
+    participant_error = _session_participant_error(skill_session)
+    if participant_error:
+        return participant_error
+    if skill_session.status != "SCHEDULED":
+        return jsonify(error="Only scheduled sessions can be started."), 409
+
+    skill_session.status = "IN_PROGRESS"
+    other_user_id = (
+        skill_session.learner_id
+        if current_user.id == skill_session.teacher_id
+        else skill_session.teacher_id
+    )
+    _add_notification(
+        other_user_id,
+        f"{current_user.name} started the {skill_session.skill.name} session: {skill_session.title}.",
+        "session_started",
+        related_entity_id=skill_session.id,
+    )
+    db.session.commit()
+    return jsonify(session=_session_response(skill_session))
+
+
+@app.route("/api/sessions/<int:session_id>/confirm-completion", methods=["POST"])
+@login_required
+def confirm_session_completion(session_id):
+    skill_session = _session_for_update(session_id)
+    if skill_session is None:
+        return jsonify(error="Session not found."), 404
+    participant_error = _session_participant_error(skill_session)
+    if participant_error:
+        return participant_error
+    if skill_session.status == "CANCELLED":
+        return jsonify(error="Cancelled sessions cannot be completed."), 409
+    if skill_session.status != "IN_PROGRESS":
+        return jsonify(error="Only in-progress sessions can be confirmed."), 409
+
+    confirmation_field = (
+        "teacher_confirmed"
+        if current_user.id == skill_session.teacher_id
+        else "learner_confirmed"
+    )
+    confirmation_changed = not getattr(skill_session, confirmation_field)
+    setattr(skill_session, confirmation_field, True)
+    other_user_id = (
+        skill_session.learner_id
+        if current_user.id == skill_session.teacher_id
+        else skill_session.teacher_id
+    )
+    if confirmation_changed:
+        _add_notification(
+            other_user_id,
+            f"{current_user.name} confirmed completion of the {skill_session.skill.name} session.",
+            "session_completion_confirmation",
+            related_entity_id=skill_session.id,
+        )
+    if skill_session.teacher_confirmed and skill_session.learner_confirmed:
+        skill_session.status = "COMPLETED"
+        _notify_session_participants(
+            skill_session,
+            f"The {skill_session.skill.name} session has been completed.",
+            "session_completed",
+        )
+    db.session.commit()
+    return jsonify(session=_session_response(skill_session))
+
+
+@app.route("/api/sessions/<int:session_id>/cancel", methods=["POST"])
+@login_required
+def cancel_session(session_id):
+    skill_session = _session_for_update(session_id)
+    if skill_session is None:
+        return jsonify(error="Session not found."), 404
+    participant_error = _session_participant_error(skill_session)
+    if participant_error:
+        return participant_error
+    if skill_session.status not in {"SCHEDULED", "IN_PROGRESS"}:
+        return jsonify(error="Only scheduled or in-progress sessions can be cancelled."), 409
+
+    skill_session.status = "CANCELLED"
+    other_user_id = (
+        skill_session.learner_id
+        if current_user.id == skill_session.teacher_id
+        else skill_session.teacher_id
+    )
+    _add_notification(
+        other_user_id,
+        f"{current_user.name} cancelled the {skill_session.skill.name} session: {skill_session.title}.",
+        "session_cancelled",
+        related_entity_id=skill_session.id,
+    )
+    db.session.commit()
+    return jsonify(session=_session_response(skill_session))
+
+
+@app.route("/messages", methods=["GET", "POST"])
+@login_required
+def messages():
+    connected_users = _get_connected_users(current_user.id)
+
+    if request.method == "POST":
+        try:
+            receiver_id = int(request.form.get("receiver_id", ""))
+        except ValueError:
+            flash("Choose a connected member to message.", "error")
+            return redirect(url_for("messages"))
+
+        receiver = next((user for user in connected_users if user.id == receiver_id), None)
+        if receiver is None:
+            flash("You can only message a connected member.", "error")
+            return redirect(url_for("messages"))
+
+        message_text = request.form.get("message", "").strip()
+        uploaded_file = request.files.get("attachment")
+        has_attachment = uploaded_file is not None and bool(uploaded_file.filename)
+        if not message_text and not has_attachment:
+            flash("Write a message before sending.", "error")
+            return redirect(url_for("messages", user_id=receiver.id))
+        if len(message_text) > 2000:
+            flash("Keep messages under 2,000 characters.", "error")
+            return redirect(url_for("messages", user_id=receiver.id))
+
+        attachment_name = None
+        attachment_path = None
+        attachment_type = None
+        attachment_payload = None
+        if has_attachment:
+            attachment_name = secure_filename(uploaded_file.filename)[:255] or "attachment"
+            original_extension = os.path.splitext(attachment_name)[1].lower()
+            declared_type = (
+                (uploaded_file.mimetype or "")
+                .lower()
+                .split(";", 1)[0]
+                .strip()
+            )
+            image_extensions = {".png", ".jpg", ".jpeg", ".webp"}
+            if original_extension in image_extensions:
+                try:
+                    extension, attachment_type, attachment_payload = (
+                        _validated_uploaded_image(uploaded_file)
+                    )
+                except ValueError:
+                    flash(
+                        "Image filename, MIME type, and image content must match.",
+                        "error",
+                    )
+                    return redirect(url_for("messages", user_id=receiver.id))
+            elif original_extension == ".pdf" and declared_type == "application/pdf":
+                uploaded_file.stream.seek(0)
+                header = uploaded_file.stream.read(5)
+                uploaded_file.stream.seek(0)
+                if not header.startswith(b"%PDF-"):
+                    flash("The file extension and MIME type do not match PDF content.", "error")
+                    return redirect(url_for("messages", user_id=receiver.id))
+                extension, attachment_type = "pdf", "application/pdf"
+                attachment_payload = uploaded_file.stream.read()
+            elif original_extension == ".txt" and declared_type == "text/plain":
+                attachment_payload = uploaded_file.stream.read()
+                try:
+                    decoded_text = attachment_payload.decode("utf-8")
+                except UnicodeDecodeError:
+                    flash("Text attachments must use UTF-8 encoding.", "error")
+                    return redirect(url_for("messages", user_id=receiver.id))
+                if "\x00" in decoded_text:
+                    flash("Text attachments cannot contain binary data.", "error")
+                    return redirect(url_for("messages", user_id=receiver.id))
+                extension, attachment_type = "txt", "text/plain"
+            else:
+                flash(
+                    "Attachments must be PNG, JPEG, WebP, PDF, or UTF-8 text files "
+                    "with matching file extensions and MIME types.",
+                    "error",
+                )
+                return redirect(url_for("messages", user_id=receiver.id))
+
+            attachment_path = f"{secrets.token_hex(16)}.{extension}"
+            attachment_directory = os.path.join(
+                app.instance_path,
+                "uploads",
+                "messages",
+            )
+            os.makedirs(attachment_directory, exist_ok=True)
+            with open(
+                os.path.join(attachment_directory, attachment_path),
+                "wb",
+            ) as attachment_file:
+                attachment_file.write(attachment_payload)
+
+        new_message = Message(
+            sender_id=current_user.id,
+            receiver_id=receiver.id,
+            message=message_text or f"Shared an attachment: {attachment_name}",
+            attachment_name=attachment_name,
+            attachment_path=attachment_path,
+            attachment_type=attachment_type,
+        )
+        db.session.add(new_message)
+        db.session.flush()
+        _add_notification(
+            receiver.id,
+            f"{current_user.name} sent you a message.",
+            "message",
+            related_entity_id=new_message.id,
+        )
+        try:
+            db.session.commit()
+        except SQLAlchemyError:
+            db.session.rollback()
+            if attachment_path:
+                saved_attachment = os.path.join(
+                    app.instance_path,
+                    "uploads",
+                    "messages",
+                    attachment_path,
+                )
+                if os.path.isfile(saved_attachment):
+                    os.remove(saved_attachment)
+            raise
+        return redirect(url_for("messages", user_id=receiver.id))
+
+    conversations = []
+    for connected_user in connected_users:
+        conversation_filter = or_(
+            and_(
+                Message.sender_id == current_user.id,
+                Message.receiver_id == connected_user.id,
+            ),
+            and_(
+                Message.sender_id == connected_user.id,
+                Message.receiver_id == current_user.id,
+            ),
+        )
+        last_message = (
+            Message.query.filter(conversation_filter)
+            .order_by(Message.created_at.desc(), Message.id.desc())
+            .first()
+        )
+        unread_count = Message.query.filter_by(
+            sender_id=connected_user.id,
+            receiver_id=current_user.id,
+            is_read=False,
+        ).count()
+        conversations.append(
+            {
+                "user": connected_user,
+                "last_message": last_message,
+                "unread_count": unread_count,
+            }
+        )
+
+    active_user = None
+    requested_user_id = request.args.get("user_id")
+    if requested_user_id:
+        try:
+            requested_user_id = int(requested_user_id)
+        except ValueError:
+            abort(404)
+        active_user = next(
+            (user for user in connected_users if user.id == requested_user_id),
+            None,
+        )
+        if active_user is None:
+            abort(404)
+    elif conversations:
+        conversations.sort(
+            key=lambda conversation: (
+                conversation["last_message"] is not None,
+                conversation["last_message"].created_at
+                if conversation["last_message"] is not None
+                else 0,
+            ),
+            reverse=True,
+        )
+        active_user = conversations[0]["user"]
+
+    thread_messages = []
+    if active_user is not None:
+        thread_messages = (
+            Message.query.filter(
+                or_(
+                    and_(
+                        Message.sender_id == current_user.id,
+                        Message.receiver_id == active_user.id,
+                    ),
+                    and_(
+                        Message.sender_id == active_user.id,
+                        Message.receiver_id == current_user.id,
+                    ),
+                )
+            )
+            .order_by(Message.created_at.asc(), Message.id.asc())
+            .all()
+        )
+        unread_messages = [
+            message
+            for message in thread_messages
+            if message.receiver_id == current_user.id and not message.is_read
+        ]
+        if unread_messages:
+            for message in unread_messages:
+                message.is_read = True
+            db.session.commit()
+
+    return render_template(
+        "messages.html",
+        conversations=conversations,
+        active_user=active_user,
+        thread_messages=thread_messages,
+    )
+
+
+@app.route("/messages/attachments/<int:message_id>")
+@login_required
+def download_message_attachment(message_id):
+    message = db.get_or_404(Message, message_id)
+    if current_user.id not in {message.sender_id, message.receiver_id}:
+        abort(403)
+    if not _users_are_connected(message.sender_id, message.receiver_id):
+        abort(404)
+    if not message.attachment_path or not re.fullmatch(
+        r"[0-9a-f]{32}\.(?:png|jpg|webp|pdf|txt)",
+        message.attachment_path,
+    ):
+        abort(404)
+    path = os.path.join(
+        app.instance_path,
+        "uploads",
+        "messages",
+        message.attachment_path,
+    )
+    if not os.path.isfile(path):
+        abort(404)
+    response = send_file(
+        path,
+        mimetype=message.attachment_type or "application/octet-stream",
+        as_attachment=True,
+        download_name=message.attachment_name or "attachment",
+        conditional=True,
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+@app.route("/reviews", methods=["GET", "POST"])
+@login_required
+def reviews():
+    if request.method == "POST":
+        try:
+            skill_request_id = int(request.form.get("skill_request_id", ""))
+            rating = int(request.form.get("rating", ""))
+        except ValueError:
+            flash("Choose a completed exchange and a rating from 1 to 5.", "error")
+            return redirect(url_for("reviews"))
+
+        skill_request = db.session.get(SkillRequest, skill_request_id)
+        if (
+            skill_request is None
+            or skill_request.status.lower() != "completed"
+            or current_user.id not in {skill_request.sender_id, skill_request.receiver_id}
+        ):
+            flash("You can only review a completed exchange you participated in.", "error")
+            return redirect(url_for("reviews"))
+
+        if rating < 1 or rating > 5:
+            flash("Choose a rating from 1 to 5 stars.", "error")
+            return redirect(url_for("reviews"))
+
+        comment = request.form.get("comment", "").strip()
+        if len(comment) > 1000:
+            flash("Keep your review under 1,000 characters.", "error")
+            return redirect(url_for("reviews"))
+
+        existing_review = Review.query.filter_by(
+            skill_request_id=skill_request.id,
+            reviewer_id=current_user.id,
+        ).first()
+        if existing_review:
+            flash("You have already reviewed this skill exchange.", "info")
+            return redirect(url_for("reviews"))
+
+        reviewed_user_id = (
+            skill_request.receiver_id
+            if skill_request.sender_id == current_user.id
+            else skill_request.sender_id
+        )
+        db.session.add(
+            Review(
+                reviewer_id=current_user.id,
+                reviewed_user_id=reviewed_user_id,
+                skill_request_id=skill_request.id,
+                rating=rating,
+                comment=comment or None,
+            )
+        )
+        _add_notification(
+            reviewed_user_id,
+            f"{current_user.name} left you a {rating}-star review.",
+            "review",
+        )
+        try:
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            flash("You have already reviewed this skill exchange.", "info")
+            return redirect(url_for("reviews"))
+
+        flash("Your review has been submitted.", "success")
+        return redirect(url_for("reviews"))
+
+    completed_exchanges = (
+        SkillRequest.query.filter(
+            func.lower(SkillRequest.status) == "completed",
+            or_(
+                SkillRequest.sender_id == current_user.id,
+                SkillRequest.receiver_id == current_user.id,
+            ),
+        )
+        .order_by(SkillRequest.created_at.desc())
+        .all()
+    )
+    completed_request_ids = [exchange.id for exchange in completed_exchanges]
+    existing_reviews = (
+        Review.query.filter(
+            Review.reviewer_id == current_user.id,
+            Review.skill_request_id.in_(completed_request_ids),
+        ).all()
+        if completed_request_ids
+        else []
+    )
+    reviews_by_request = {
+        review.skill_request_id: review for review in existing_reviews
+    }
+    reviewable_exchanges = [
+        {
+            "request": exchange,
+            "other_user": (
+                exchange.receiver
+                if exchange.sender_id == current_user.id
+                else exchange.sender
+            ),
+            "review": reviews_by_request.get(exchange.id),
+        }
+        for exchange in completed_exchanges
+    ]
+
+    review_count = Review.query.filter_by(reviewed_user_id=current_user.id).count()
+    average_rating = db.session.query(func.avg(Review.rating)).filter(
+        Review.reviewed_user_id == current_user.id
+    ).scalar()
+    recent_reviews = (
+        Review.query.filter_by(reviewed_user_id=current_user.id)
+        .order_by(Review.created_at.desc())
+        .limit(8)
+        .all()
+    )
+    completed_sessions = SkillSession.query.filter(
+        SkillSession.status == "COMPLETED",
+        or_(
+            SkillSession.teacher_id == current_user.id,
+            SkillSession.learner_id == current_user.id,
+        ),
+    ).order_by(SkillSession.date.desc(), SkillSession.start_time.desc()).all()
+    completed_session_ids = [item.id for item in completed_sessions]
+    session_reviews = (
+        Review.query.filter(
+            Review.session_id.in_(completed_session_ids),
+            Review.reviewer_id == current_user.id,
+        ).all()
+        if completed_session_ids
+        else []
+    )
+    session_reviews_by_id = {review.session_id: review for review in session_reviews}
+    completed_sessions_to_rate = [
+        {
+            "session": session,
+            "other_user": (
+                session.learner
+                if session.teacher_id == current_user.id
+                else session.teacher
+            ),
+            "review": session_reviews_by_id.get(session.id),
+        }
+        for session in completed_sessions
+    ]
+
+    return render_template(
+        "reviews.html",
+        reviewable_exchanges=reviewable_exchanges,
+        average_rating=round(float(average_rating), 1) if average_rating is not None else None,
+        review_count=review_count,
+        recent_reviews=recent_reviews,
+        completed_sessions_to_rate=completed_sessions_to_rate,
+    )
+
+
+@app.route("/notifications")
+@login_required
+def view_notifications():
+    filter_name = request.args.get("filter", "all").lower()
+    if filter_name not in {"all", "unread"}:
+        abort(400)
+    notification_query = Notification.query.filter_by(user_id=current_user.id)
+    if filter_name == "unread":
+        notification_query = notification_query.filter_by(is_read=False)
+    notifications = (
+        notification_query
+        .order_by(Notification.created_at.desc())
+        .all()
+    )
+    unread_count = sum(not notification.is_read for notification in notifications)
+    return render_template(
+        "notifications.html",
+        notifications=notifications,
+        unread_count=unread_count,
+    )
+
+
+@app.route("/notifications/<int:notification_id>/read", methods=["POST"])
+@login_required
+def mark_notification_read(notification_id):
+    notification = Notification.query.filter_by(
+        id=notification_id,
+        user_id=current_user.id,
+    ).first()
+    if notification is None:
+        abort(404)
+
+    if not notification.is_read:
+        notification.is_read = True
+        db.session.commit()
+    return redirect(url_for("view_notifications"))
+
+
+@app.route("/notifications/read-all", methods=["POST"])
+@login_required
+def mark_all_notifications_read():
+    Notification.query.filter_by(
+        user_id=current_user.id,
+        is_read=False,
+    ).update({Notification.is_read: True}, synchronize_session=False)
+    db.session.commit()
+    flash("All notifications marked as read.", "success")
+    return redirect(url_for("view_notifications"))
+
+
+@app.route("/notifications/<int:notification_id>/delete", methods=["POST"])
+@login_required
+def delete_notification_page(notification_id):
+    notification = Notification.query.filter_by(
+        id=notification_id,
+        user_id=current_user.id,
+    ).first()
+    if notification is None:
+        abort(404)
+    db.session.delete(notification)
+    db.session.commit()
+    flash("Notification deleted.", "success")
+    return redirect(url_for("view_notifications"))
+
+
+def _notification_api_response(notification):
+    return {
+        "id": notification.id,
+        "user_id": notification.user_id,
+        "title": notification.title,
+        "message": notification.message,
+        "type": notification.type,
+        "related_entity_id": notification.related_entity_id,
+        "is_read": notification.is_read,
+        "created_at": notification.created_at.isoformat(),
+        "href": notification_href(notification),
+    }
+
+
+@app.route("/api/notifications", methods=["GET"])
+@login_required
+def list_api_notifications():
+    unread_value = request.args.get("unread")
+    if unread_value not in (None, "true", "false"):
+        return jsonify(error="unread must be true or false."), 400
+
+    try:
+        page = int(request.args.get("page", "1"))
+        per_page = int(request.args.get("per_page", "20"))
+    except ValueError:
+        return jsonify(error="page and per_page must be integers."), 400
+    if page < 1 or per_page < 1 or per_page > 100:
+        return jsonify(error="page must be positive and per_page must be between 1 and 100."), 400
+
+    query = Notification.query.filter_by(user_id=current_user.id)
+    if unread_value == "true":
+        query = query.filter_by(is_read=False)
+    elif unread_value == "false":
+        query = query.filter_by(is_read=True)
+    total = query.count()
+    notifications = (
+        query.order_by(Notification.created_at.desc(), Notification.id.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+        .all()
+    )
+    return jsonify(
+        notifications=[
+            _notification_api_response(notification)
+            for notification in notifications
+        ],
+        pagination={
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "pages": (total + per_page - 1) // per_page,
+        },
+    )
+
+
+@app.route("/api/notifications/unread-count", methods=["GET"])
+@login_required
+def api_unread_notification_count():
+    count = Notification.query.filter_by(
+        user_id=current_user.id,
+        is_read=False,
+    ).count()
+    return jsonify(unread_count=count)
+
+
+@app.route("/api/notifications/<int:notification_id>/read", methods=["POST"])
+@login_required
+def api_mark_notification_read(notification_id):
+    notification = Notification.query.filter_by(
+        id=notification_id,
+        user_id=current_user.id,
+    ).first()
+    if notification is None:
+        return jsonify(error="Notification not found."), 404
+    notification.is_read = True
+    db.session.commit()
+    return jsonify(notification=_notification_api_response(notification))
+
+
+@app.route("/api/notifications/read-all", methods=["POST"])
+@login_required
+def api_mark_all_notifications_read():
+    updated_count = Notification.query.filter_by(
+        user_id=current_user.id,
+        is_read=False,
+    ).update(
+        {Notification.is_read: True},
+        synchronize_session=False,
+    )
+    db.session.commit()
+    return jsonify(updated_count=updated_count)
+
+
+@app.route("/api/notifications/<int:notification_id>", methods=["DELETE"])
+@login_required
+def api_delete_notification(notification_id):
+    notification = Notification.query.filter_by(
+        id=notification_id,
+        user_id=current_user.id,
+    ).first()
+    if notification is None:
+        return jsonify(error="Notification not found."), 404
+    db.session.delete(notification)
+    db.session.commit()
+    return "", 204
+
+
+@app.route("/api/privacy", methods=["GET"])
+@login_required
+def get_privacy_settings():
+    return jsonify(_privacy_response(current_user))
+
+
+@app.route("/api/privacy", methods=["PUT"])
+@login_required
+def update_privacy_settings():
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or not body:
+        return jsonify(error="A non-empty JSON object is required."), 400
+    allowed_fields = {
+        "profile_visibility",
+        "location_visibility",
+        "online_status_visibility",
+        "notification_preferences",
+    }
+    if set(body) - allowed_fields:
+        return jsonify(error="One or more privacy settings are not supported."), 400
+
+    if "profile_visibility" in body:
+        visibility = body["profile_visibility"]
+        if not isinstance(visibility, str) or visibility not in {"public", "private"}:
+            return jsonify(error="profile_visibility must be public or private."), 400
+        current_user.profile_visibility = visibility
+
+    for key, column in (
+        ("location_visibility", "location_visibility"),
+        ("online_status_visibility", "online_status_visibility"),
+    ):
+        if key in body:
+            if not isinstance(body[key], bool):
+                return jsonify(error=f"{key} must be a boolean."), 400
+            setattr(current_user, column, body[key])
+
+    if "notification_preferences" in body:
+        preferences = body["notification_preferences"]
+        preference_columns = {
+            "requests": "notify_requests",
+            "messages": "notify_messages",
+            "sessions": "notify_sessions",
+            "ratings": "notify_ratings",
+        }
+        if not isinstance(preferences, dict) or not preferences:
+            return jsonify(error="notification_preferences must be a non-empty object."), 400
+        if set(preferences) - set(preference_columns):
+            return jsonify(error="Unsupported notification preference."), 400
+        if any(not isinstance(value, bool) for value in preferences.values()):
+            return jsonify(error="Notification preferences must be booleans."), 400
+        for preference, enabled in preferences.items():
+            setattr(current_user, preference_columns[preference], enabled)
+
+    db.session.commit()
+    return jsonify(_privacy_response(current_user))
+
+
+@app.route("/api/users/<int:user_id>/block", methods=["POST"])
+@login_required
+def block_user(user_id):
+    if user_id == current_user.id:
+        return jsonify(error="You cannot block yourself."), 400
+    target_user = db.session.get(User, user_id)
+    if target_user is None or not target_user.is_active:
+        return jsonify(error="User not found."), 404
+    existing_block = BlockedUser.query.filter_by(
+        blocker_id=current_user.id,
+        blocked_id=user_id,
+    ).first()
+    if existing_block:
+        return jsonify(blocked=True, user_id=user_id), 200
+    db.session.add(BlockedUser(blocker_id=current_user.id, blocked_id=user_id))
+    db.session.commit()
+    return jsonify(blocked=True, user_id=user_id), 201
+
+
+@app.route("/api/users/<int:user_id>/block", methods=["DELETE"])
+@login_required
+def unblock_user(user_id):
+    blocked_user = BlockedUser.query.filter_by(
+        blocker_id=current_user.id,
+        blocked_id=user_id,
+    ).first()
+    if blocked_user is None:
+        return jsonify(error="Blocked user not found."), 404
+    db.session.delete(blocked_user)
+    db.session.commit()
+    return "", 204
+
+
+@app.route("/api/users/me/blocked", methods=["GET"])
+@login_required
+def list_blocked_users():
+    blocked_users = (
+        BlockedUser.query.filter_by(blocker_id=current_user.id)
+        .join(User, User.id == BlockedUser.blocked_id)
+        .order_by(User.name.asc())
+        .all()
+    )
+    return jsonify(
+        blocked_users=[
+            {
+                "id": item.blocked.id,
+                "name": item.blocked.name,
+                "username": item.blocked.username,
+                "blocked_at": item.created_at.isoformat(),
+            }
+            for item in blocked_users
+        ]
+    )
+
+
+REPORT_REASONS = {
+    "inappropriate_behaviour",
+    "spam",
+    "fake_profile",
+    "harassment",
+    "other",
+}
+REPORT_STATUSES = {"submitted", "under_review", "resolved", "rejected"}
+
+
+def _report_response(report):
+    return {
+        "id": report.id,
+        "reporter": {
+            "id": report.reporter_id,
+            "name": report.reporter.name,
+            "username": report.reporter.username,
+        },
+        "reported_user": {
+            "id": report.reported_user_id,
+            "name": report.reported_user.name,
+            "username": report.reported_user.username,
+        },
+        "reason": report.reason,
+        "description": report.description,
+        "status": report.status,
+        "moderation_notes": report.moderation_notes,
+        "moderator_id": report.moderator_id,
+        "reviewed_at": report.reviewed_at.isoformat() if report.reviewed_at else None,
+        "created_at": report.created_at.isoformat(),
+    }
+
+
+@app.route("/api/reports", methods=["POST"])
+@login_required
+def submit_report():
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify(error="A JSON object is required."), 400
+    if set(body) - {"reported_user_id", "reason", "description"}:
+        return jsonify(error="Only reported_user_id, reason, and description can be provided."), 400
+    reported_user_id = body.get("reported_user_id")
+    if isinstance(reported_user_id, bool) or not isinstance(reported_user_id, int):
+        return jsonify(error="reported_user_id must be an integer."), 400
+    if reported_user_id == current_user.id:
+        return jsonify(error="You cannot report yourself."), 400
+    target_user = db.session.get(User, reported_user_id)
+    if target_user is None:
+        return jsonify(error="Reported user not found."), 404
+
+    reason = body.get("reason")
+    if not isinstance(reason, str) or reason not in REPORT_REASONS:
+        return jsonify(error="Choose a valid report reason."), 400
+    description = body.get("description")
+    if (
+        not isinstance(description, str)
+        or not description.strip()
+        or len(description.strip()) > 2000
+    ):
+        return jsonify(error="Description is required and must be at most 2,000 characters."), 400
+
+    duplicate_report = Report.query.filter(
+        Report.reporter_id == current_user.id,
+        Report.reported_user_id == reported_user_id,
+        Report.status.in_(("submitted", "under_review")),
+    ).first()
+    if duplicate_report:
+        return jsonify(error="You already have an open report for this user."), 409
+
+    report = Report(
+        reporter_id=current_user.id,
+        reported_user_id=reported_user_id,
+        reason=reason,
+        description=description.strip(),
+    )
+    db.session.add(report)
+    db.session.commit()
+    return jsonify(report=_report_response(report)), 201
+
+
+@app.route("/api/reports", methods=["GET"])
+@login_required
+def list_reports():
+    if not current_user.is_admin:
+        return jsonify(error="Administrator access is required."), 403
+    status_filter = request.args.get("status")
+    if status_filter and status_filter not in REPORT_STATUSES:
+        return jsonify(error="Invalid report status."), 400
+    try:
+        page = int(request.args.get("page", "1"))
+        per_page = int(request.args.get("per_page", "20"))
+    except ValueError:
+        return jsonify(error="page and per_page must be integers."), 400
+    if page < 1 or per_page < 1 or per_page > 100:
+        return jsonify(error="page must be positive and per_page must be between 1 and 100."), 400
+
+    query = Report.query
+    if status_filter:
+        query = query.filter_by(status=status_filter)
+    total = query.count()
+    reports = (
+        query.order_by(Report.created_at.desc(), Report.id.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+        .all()
+    )
+    return jsonify(
+        reports=[_report_response(report) for report in reports],
+        pagination={
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "pages": (total + per_page - 1) // per_page,
+        },
+    )
+
+
+@app.route("/api/reports/<int:report_id>", methods=["GET"])
+@login_required
+def get_report(report_id):
+    if not current_user.is_admin:
+        return jsonify(error="Administrator access is required."), 403
+    report = db.session.get(Report, report_id)
+    if report is None:
+        return jsonify(error="Report not found."), 404
+    return jsonify(report=_report_response(report))
+
+
+@app.route("/api/reports/<int:report_id>/status", methods=["PUT"])
+@login_required
+def update_report_status(report_id):
+    if not current_user.is_admin:
+        return jsonify(error="Administrator access is required."), 403
+    body = request.get_json(silent=True)
+    if (
+        not isinstance(body, dict)
+        or not set(body).issubset({"status", "moderation_notes"})
+        or "status" not in body
+    ):
+        return jsonify(error="Provide status and optional moderation_notes only."), 400
+    status = body["status"]
+    if not isinstance(status, str) or status not in REPORT_STATUSES or status == "submitted":
+        return jsonify(error="Status must be under_review, resolved, or rejected."), 400
+    notes = body.get("moderation_notes")
+    if notes is not None and (
+        not isinstance(notes, str) or len(notes.strip()) > 2000
+    ):
+        return jsonify(error="moderation_notes must be a string up to 2,000 characters."), 400
+    report = db.session.get(Report, report_id)
+    if report is None:
+        return jsonify(error="Report not found."), 404
+    report.status = status
+    if "moderation_notes" in body:
+        report.moderation_notes = notes.strip() or None if notes is not None else None
+    report.moderator_id = current_user.id
+    report.reviewed_at = datetime.now(timezone.utc)
+    _log_admin_action(
+        "report_status_changed",
+        "report",
+        report.id,
+        {"status": status, "moderation_notes": report.moderation_notes},
+    )
+    db.session.commit()
+    return jsonify(report=_report_response(report))
+
+
+@app.route("/profile")
+@login_required
+def my_profile():
+    return redirect(url_for("user_profile", user_id=current_user.id))
+
+
+@app.route("/profile/<int:user_id>")
+def user_profile(user_id):
+    profile_user = db.get_or_404(User, user_id)
+    is_own_profile = current_user.is_authenticated and current_user.id == profile_user.id
+    if not profile_user.is_active and not is_own_profile and not (
+        current_user.is_authenticated and current_user.is_admin
+    ):
+        abort(404)
+    if not is_own_profile and not (
+        current_user.is_authenticated and current_user.is_admin
+    ):
+        if profile_user.profile_visibility != "public":
+            abort(404)
+        if current_user.is_authenticated and _users_are_blocked(
+            current_user.id,
+            profile_user.id,
+        ):
+            abort(404)
+    user_skills = (
+        UserSkill.query.filter_by(user_id=profile_user.id)
+        .join(Skill)
+        .order_by(Skill.name.asc())
+        .all()
+    )
+    reviews_query = Review.query.filter_by(reviewed_user_id=profile_user.id)
+    rating_summary = _rating_summary(reviews_query)
+
+    return render_template(
+        "profile.html",
+        profile_user=profile_user,
+        skills_to_teach=[item for item in user_skills if item.skill_type == "teach"],
+        skills_to_learn=[item for item in user_skills if item.skill_type == "learn"],
+        average_rating=rating_summary["average_rating"],
+        review_count=rating_summary["rating_count"],
+        rating_distribution=rating_summary["rating_distribution"],
+        recent_reviews=reviews_query.order_by(Review.created_at.desc()).limit(6).all(),
+        is_own_profile=is_own_profile,
+        show_location=(
+            is_own_profile
+            or (current_user.is_authenticated and current_user.is_admin)
+            or profile_user.location_visibility
+        ),
+    )
+
+
+@app.route("/profile/edit", methods=["GET", "POST"])
+@login_required
+def edit_profile():
+    if request.method == "POST":
+        name = request.form.get("name", "").strip()
+        username = request.form.get("username", "").strip().lower()
+        location = request.form.get("location", "").strip()
+        bio = request.form.get("bio", "").strip()
+        profile_image = request.form.get("profile_image", "").strip()
+        uploaded_image = request.files.get("profile_image_file")
+
+        if not name or not username:
+            flash("Name and username are required.", "error")
+            return render_template("edit_profile.html")
+
+        if len(name) > 120 or len(username) > 80 or len(location) > 120 or len(bio) > 1000 or len(profile_image) > 255:
+            flash("One or more fields are longer than allowed.", "error")
+            return render_template("edit_profile.html")
+
+        if profile_image:
+            image_url = urlsplit(profile_image)
+            is_local_upload = re.fullmatch(
+                r"/profile-images/[0-9a-f]{32}\.(?:png|jpg|webp)",
+                profile_image,
+            )
+            if not is_local_upload and (
+                image_url.scheme != "https" or not image_url.netloc
+            ):
+                flash("Please use a valid public HTTPS image URL.", "error")
+                return render_template("edit_profile.html")
+
+        image_upload_path = None
+        if uploaded_image is not None and uploaded_image.filename:
+            try:
+                image_extension, _image_type, image_payload = (
+                    _validated_uploaded_image(uploaded_image)
+                )
+            except ValueError:
+                flash("Upload a valid PNG, JPEG, or WebP image.", "error")
+                return render_template("edit_profile.html")
+            image_filename = f"{secrets.token_hex(16)}.{image_extension}"
+            profile_image = f"/profile-images/{image_filename}"
+
+        duplicate_username = User.query.filter(
+            func.lower(User.username) == username,
+            User.id != current_user.id,
+        ).first()
+        if duplicate_username:
+            flash("That username is already taken. Please choose another.", "error")
+            return render_template("edit_profile.html")
+
+        if uploaded_image is not None and uploaded_image.filename:
+            image_upload_path = os.path.join(
+                app.instance_path,
+                "uploads",
+                "profile",
+                image_filename,
+            )
+            os.makedirs(os.path.dirname(image_upload_path), exist_ok=True)
+            with open(image_upload_path, "wb") as image_file:
+                image_file.write(image_payload)
+
+        current_user.name = name
+        current_user.username = username
+        current_user.location = location or None
+        current_user.bio = bio or None
+        current_user.profile_image = profile_image or None
+
+        try:
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            if image_upload_path and os.path.isfile(image_upload_path):
+                os.remove(image_upload_path)
+            flash("That username is already taken. Please choose another.", "error")
+            return render_template("edit_profile.html")
+        except SQLAlchemyError:
+            db.session.rollback()
+            if image_upload_path and os.path.isfile(image_upload_path):
+                os.remove(image_upload_path)
+            raise
+
+        flash("Your profile has been updated.", "success")
+        return redirect(url_for("my_profile"))
+
+    return render_template("edit_profile.html")
+
+
+@app.route("/profile-images/<filename>")
+def profile_image_file(filename):
+    match = re.fullmatch(r"([0-9a-f]{32})\.(png|jpg|webp)", filename)
+    if match is None:
+        abort(404)
+    image_url = f"/profile-images/{filename}"
+    profile_owner = User.query.filter_by(profile_image=image_url).first()
+    if profile_owner is None:
+        abort(404)
+    if not profile_owner.is_active and (
+        not current_user.is_authenticated
+        or (
+            current_user.id != profile_owner.id
+            and not current_user.is_admin
+        )
+    ):
+        abort(404)
+    if (
+        profile_owner.profile_visibility != "public"
+        and (
+            not current_user.is_authenticated
+            or (
+                current_user.id != profile_owner.id
+                and not current_user.is_admin
+            )
+        )
+    ):
+        abort(404)
+    if (
+        current_user.is_authenticated
+        and current_user.id != profile_owner.id
+        and not current_user.is_admin
+        and _users_are_blocked(current_user.id, profile_owner.id)
+    ):
+        abort(404)
+    image_path = os.path.join(
+        app.instance_path,
+        "uploads",
+        "profile",
+        filename,
+    )
+    if not os.path.isfile(image_path):
+        abort(404)
+    image_types = {"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp"}
+    response = send_file(
+        image_path,
+        mimetype=image_types[match.group(2)],
+        conditional=True,
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Cache-Control"] = "private, max-age=300"
+    return response
+
+
+def run_development_server():
+    if _production:
+        raise RuntimeError(
+            "Do not use Flask's development server in production; run the WSGI entry point with Gunicorn."
+        )
+    host = os.environ.get("SKILLSWAP_HOST", "127.0.0.1").strip()
+    if not host:
+        raise RuntimeError("SKILLSWAP_HOST must not be empty.")
+    try:
+        port = int(os.environ.get("SKILLSWAP_PORT", "5000"))
+    except ValueError as error:
+        raise RuntimeError("SKILLSWAP_PORT must be an integer from 1 to 65535.") from error
+    if not 1 <= port <= 65535:
+        raise RuntimeError("SKILLSWAP_PORT must be an integer from 1 to 65535.")
+
+    debug = os.environ.get("SKILLSWAP_DEBUG", "").strip().lower() == "true"
+    app.run(
+        host=host,
+        port=port,
+        debug=debug,
+        use_reloader=False,
+    )
+
+
+if __name__ == "__main__":
+    run_development_server()

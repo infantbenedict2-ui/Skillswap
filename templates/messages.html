@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Private conversations between connected SkillSwap members.">
+    <title>Messages | SkillSwap</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header class="site-header">
+        <nav class="navbar shell" aria-label="Main navigation">
+            <a class="brand" href="{{ url_for('home') }}" aria-label="SkillSwap home">
+                <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+                <span>Skill<span class="brand-accent">Swap</span></span>
+            </a>
+            <div class="profile-header-links">
+                <a class="nav-link" href="{{ url_for('dashboard') }}">Dashboard</a>
+                <a class="button button-small button-outline" href="{{ url_for('view_requests') }}">Requests</a>
+            </div>
+        </nav>
+    </header>
+
+    <main class="messages-page shell">
+        <div class="messages-page-heading">
+            <div><p class="eyebrow">Keep the conversation going</p><h1>Messages</h1><p>Private conversations with your SkillSwap connections.</p></div>
+            <a class="messages-back-link" href="{{ url_for('dashboard') }}">← Back to dashboard</a>
+        </div>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="form-flashes" aria-live="polite">
+                    {% for category, message in messages %}
+                        <p class="flash-message flash-{{ category }}" role="{{ 'alert' if category == 'error' else 'status' }}">{{ message }}</p>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+
+        <div class="messaging-layout">
+            <aside class="conversation-sidebar" aria-label="Your conversations">
+                <div class="conversation-sidebar-heading"><h2>Connections</h2><span>{{ conversations|length }}</span></div>
+                {% if conversations %}
+                    <nav class="conversation-list">
+                        {% for conversation in conversations %}
+                            <a class="conversation-link{% if active_user and active_user.id == conversation.user.id %} is-active{% endif %}" href="{{ url_for('messages', user_id=conversation.user.id) }}">
+                                <span class="conversation-avatar">
+                                    <span aria-hidden="true">{{ conversation.user.name[:1]|upper }}</span>
+                                    {% if conversation.user.profile_image %}<img data-avatar-image src="{{ conversation.user.profile_image }}" alt="">{% endif %}
+                                </span>
+                                <span class="conversation-summary"><strong>{{ conversation.user.name }}</strong><span>{% if conversation.last_message %}{% if conversation.last_message.sender_id == current_user.id %}You: {% endif %}{{ conversation.last_message.message|truncate(54, true) }}{% else %}Start a conversation{% endif %}</span></span>
+                                {% if conversation.unread_count %}<span class="conversation-unread">{{ conversation.unread_count }}</span>{% endif %}
+                            </a>
+                        {% endfor %}
+                    </nav>
+                {% else %}
+                    <p class="conversation-empty">Accepted skill requests become your private conversations.</p>
+                    <a class="conversation-find-link" href="{{ url_for('matches') }}">Find a connection <span aria-hidden="true">↗</span></a>
+                {% endif %}
+            </aside>
+
+            <section class="message-thread" aria-label="Conversation{% if active_user %} with {{ active_user.name }}{% endif %}">
+                {% if active_user %}
+                    <header class="message-thread-header">
+                        <span class="conversation-avatar thread-avatar">
+                            <span aria-hidden="true">{{ active_user.name[:1]|upper }}</span>
+                            {% if active_user.profile_image %}<img data-avatar-image src="{{ active_user.profile_image }}" alt="">{% endif %}
+                        </span>
+                        <div><h2>{{ active_user.name }}</h2><a href="{{ url_for('user_profile', user_id=active_user.id) }}">View profile <span aria-hidden="true">↗</span></a></div>
+                        <span class="connected-label"><span></span>Connected</span>
+                    </header>
+
+                    <div class="message-history" role="log" aria-live="polite" aria-relevant="additions text">
+                        {% if thread_messages %}
+                            {% for message in thread_messages %}
+                                <article class="message-entry{% if message.sender_id == current_user.id %} message-entry-own{% endif %}">
+                                    <div class="message-bubble">{{ message.message }}</div>
+                                    {% if message.attachment_path %}<a class="message-attachment" href="{{ url_for('download_message_attachment', message_id=message.id) }}" rel="nofollow">Download {{ message.attachment_name }}</a>{% endif %}
+                                    <div class="message-meta"><time datetime="{{ message.created_at.isoformat() }}">{{ message.created_at.strftime('%b %d, %Y · %I:%M %p') }}</time>{% if message.sender_id == current_user.id and message.is_read %}<span>Read</span>{% endif %}</div>
+                                </article>
+                            {% endfor %}
+                        {% else %}
+                            <div class="thread-empty"><span aria-hidden="true">···</span><p>Say hello and start your skill exchange.</p></div>
+                        {% endif %}
+                    </div>
+
+                    <form class="message-compose" method="post" enctype="multipart/form-data" action="{{ url_for('messages') }}">
+                        <input type="hidden" name="receiver_id" value="{{ active_user.id }}">
+                        <label class="sr-only" for="message-text">Write a message</label>
+                        <textarea id="message-text" name="message" rows="2" maxlength="2000" placeholder="Write a message or attach a file..."></textarea>
+                        <label class="sr-only" for="message-attachment">Attach an image, PDF, or text file</label>
+                        <input id="message-attachment" name="attachment" type="file" accept="image/png,image/jpeg,image/webp,application/pdf,text/plain">
+                        <button class="emoji-insert" type="button" data-insert-emoji="🙂" aria-label="Insert smile emoji">🙂</button>
+                        <button class="button button-dark" type="submit">Send <span aria-hidden="true">↗</span></button>
+                    </form>
+                {% else %}
+                    <div class="no-conversation"><span aria-hidden="true">···</span><h2>Your conversations live here</h2><p>Select a connection to read or send a private message.</p></div>
+                {% endif %}
+            </section>
+        </div>
+    </main>
+    <script src="{{ url_for('static', filename='js/script.js') }}" defer></script>
+</body>
+</html>

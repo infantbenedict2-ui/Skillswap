@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Review and manage your SkillSwap requests.">
+    <title>Skill Requests | SkillSwap</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header class="site-header">
+        <nav class="navbar shell" aria-label="Main navigation">
+            <a class="brand" href="{{ url_for('home') }}" aria-label="SkillSwap home">
+                <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+                <span>Skill<span class="brand-accent">Swap</span></span>
+            </a>
+            <div class="profile-header-links">
+                <a class="nav-link" href="{{ url_for('dashboard') }}">Dashboard</a>
+                <a class="button button-small button-outline" href="{{ url_for('matches') }}">Find matches</a>
+                <a class="nav-link" href="{{ url_for('messages') }}">Messages</a>
+                <a class="nav-link" href="{{ url_for('reviews') }}">Reviews</a>
+            </div>
+        </nav>
+    </header>
+
+    <main class="requests-page shell">
+        <div class="requests-page-heading">
+            <div><p class="eyebrow">Keep learning together</p><h1>Skill Requests</h1><p>See what you’ve sent and respond to requests from other members.</p></div>
+            <a class="requests-back-link" href="{{ url_for('dashboard') }}">← Back to dashboard</a>
+        </div>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="form-flashes" aria-live="polite">
+                    {% for category, message in messages %}
+                        <p class="flash-message flash-{{ category }}" role="{{ 'alert' if category == 'error' else 'status' }}">{{ message }}</p>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+
+        <div class="requests-columns">
+            <section class="requests-panel" aria-labelledby="received-requests-title">
+                <div class="requests-panel-heading"><div><p class="eyebrow">Your next teaching connection</p><h2 id="received-requests-title">Received <span>{{ received_requests|length }}</span></h2></div><span class="requests-heading-mark received-mark" aria-hidden="true">↙</span></div>
+                {% if received_requests %}
+                    <div class="request-list">
+                        {% for skill_request in received_requests %}
+                            <article class="request-card">
+                                <div class="request-card-heading"><div><p class="request-skill-category">{{ skill_request.skill.category or 'Other' }}</p><h3>{{ skill_request.skill.name }}</h3></div><span class="request-status status-{{ skill_request.status|lower }}">{{ skill_request.status|title }}</span></div>
+                                <p class="request-parties"><a href="{{ url_for('user_profile', user_id=skill_request.sender.id) }}">{{ skill_request.sender.name }}</a> would like to learn from you.</p>
+                                <blockquote>{{ skill_request.message or 'No personal message included.' }}</blockquote>
+                                <time datetime="{{ skill_request.created_at.isoformat() }}">{{ skill_request.created_at.strftime('%b %d, %Y') }}</time>
+                                {% if skill_request.status|lower == 'pending' %}
+                                    <div class="request-actions">
+                                        <form method="post" action="{{ url_for('accept_skill_request', request_id=skill_request.id) }}"><button class="button button-dark" type="submit">Accept <span aria-hidden="true">✓</span></button></form>
+                                        <form method="post" action="{{ url_for('reject_skill_request', request_id=skill_request.id) }}"><button class="button button-outline request-reject-button" type="submit">Reject <span aria-hidden="true">×</span></button></form>
+                                    </div>
+                                {% elif skill_request.status|lower == 'accepted' %}
+                                    <form class="request-complete-form" method="post" action="{{ url_for('complete_skill_request', request_id=skill_request.id) }}"><button class="button button-outline" type="submit">Mark completed <span aria-hidden="true">✓</span></button></form>
+                                {% elif skill_request.status|lower == 'completed' %}
+                                    <a class="requests-text-link" href="{{ url_for('reviews') }}">Leave a review <span aria-hidden="true">↗</span></a>
+                                {% endif %}
+                            </article>
+                        {% endfor %}
+                    </div>
+                {% else %}
+                    <p class="requests-empty">New requests from members will appear here.</p>
+                {% endif %}
+            </section>
+
+            <section class="requests-panel" aria-labelledby="sent-requests-title">
+                <div class="requests-panel-heading"><div><p class="eyebrow">Your learning journey</p><h2 id="sent-requests-title">Sent <span>{{ sent_requests|length }}</span></h2></div><span class="requests-heading-mark sent-mark" aria-hidden="true">↗</span></div>
+                {% if sent_requests %}
+                    <div class="request-list">
+                        {% for skill_request in sent_requests %}
+                            <article class="request-card">
+                                <div class="request-card-heading"><div><p class="request-skill-category">{{ skill_request.skill.category or 'Other' }}</p><h3>{{ skill_request.skill.name }}</h3></div><span class="request-status status-{{ skill_request.status|lower }}">{{ skill_request.status|title }}</span></div>
+                                <p class="request-parties">To <a href="{{ url_for('user_profile', user_id=skill_request.receiver.id) }}">{{ skill_request.receiver.name }}</a></p>
+                                <blockquote>{{ skill_request.message or 'No personal message included.' }}</blockquote>
+                                <time datetime="{{ skill_request.created_at.isoformat() }}">{{ skill_request.created_at.strftime('%b %d, %Y') }}</time>
+                                {% if skill_request.status|lower == 'accepted' %}
+                                    <form class="request-complete-form" method="post" action="{{ url_for('complete_skill_request', request_id=skill_request.id) }}"><button class="button button-outline" type="submit">Mark completed <span aria-hidden="true">✓</span></button></form>
+                                {% elif skill_request.status|lower == 'pending' %}
+                                    <form class="request-complete-form" method="post" action="{{ url_for('cancel_skill_request', request_id=skill_request.id) }}"><button class="button button-outline" type="submit">Cancel request</button></form>
+                                {% elif skill_request.status|lower == 'completed' %}
+                                    <a class="requests-text-link" href="{{ url_for('reviews') }}">Leave a review <span aria-hidden="true">↗</span></a>
+                                {% endif %}
+                            </article>
+                        {% endfor %}
+                    </div>
+                {% else %}
+                    <p class="requests-empty">Requests you send to matches will appear here.</p>
+                    <a class="requests-text-link" href="{{ url_for('matches') }}">Find a skill match <span aria-hidden="true">↗</span></a>
+                {% endif %}
+            </section>
+        </div>
+    </main>
+</body>
+</html>

@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Find SkillSwap members who teach skills you want to learn.">
+    <title>Skill Matches | SkillSwap</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header class="site-header">
+        <nav class="navbar shell" aria-label="Main navigation">
+            <a class="brand" href="{{ url_for('home') }}" aria-label="SkillSwap home">
+                <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+                <span>Skill<span class="brand-accent">Swap</span></span>
+            </a>
+            <div class="profile-header-links">
+                <a class="nav-link" href="{{ url_for('dashboard') }}">Dashboard</a>
+                <a class="button button-small button-outline" href="{{ url_for('manage_skills') }}">My skills</a>
+                <a class="nav-link" href="{{ url_for('view_requests') }}">Requests</a>
+            </div>
+        </nav>
+    </header>
+
+    <main class="matches-page shell">
+        <div class="matches-page-heading">
+            <div><p class="eyebrow">Find your next skill swap</p><h1>Skill Matches</h1><p>Members who teach skills you want to learn.</p></div>
+            <a class="matches-back-link" href="{{ url_for('dashboard') }}">← Back to dashboard</a>
+        </div>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="form-flashes" aria-live="polite">
+                    {% for category, message in messages %}
+                        <p class="flash-message flash-{{ category }}" role="{{ 'alert' if category == 'error' else 'status' }}">{{ message }}</p>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+
+        <section class="matches-intro" aria-label="Match score">
+            <div><p class="eyebrow">Your learning list</p><div class="learning-skill-tags">{% for skill in learning_skills %}<span>{{ skill.name }}</span>{% else %}<span class="learning-empty-tag">No learning skills added</span>{% endfor %}</div></div>
+            <p>Match score: the share of your learning skills that a member teaches.</p>
+        </section>
+
+        {% if not learning_skills %}
+            <section class="matches-empty" aria-labelledby="matches-empty-title">
+                <span aria-hidden="true">＋</span><h2 id="matches-empty-title">Start with what you want to learn</h2>
+                <p>Add learning skills to your profile to find members who teach them.</p>
+                <a class="button button-dark" href="{{ url_for('manage_skills') }}">Add learning skills <span aria-hidden="true">↗</span></a>
+            </section>
+        {% elif matches %}
+            <div class="match-results" aria-label="Recommended users">
+                {% for match in matches %}
+                    <article class="match-result-card">
+                        <div class="match-result-person">
+                            <div class="match-result-avatar">
+                                <span aria-hidden="true">{{ match.user.name[:1]|upper }}</span>
+                                {% if match.user.profile_image %}<img data-avatar-image src="{{ match.user.profile_image }}" alt="">{% endif %}
+                            </div>
+                            <div class="match-result-identity">
+                                <h2>{{ match.user.name }}</h2>
+                                <p>@{{ match.user.username }}</p>
+                            </div>
+                            <div class="match-score"><strong>{{ match.match_percentage }}%</strong><span>match</span></div>
+                        </div>
+
+                        <div class="match-score-track" role="img" aria-label="{{ match.match_percentage }} percent skill match"><span style="width: {{ match.match_percentage }}%"></span></div>
+
+                        <div class="match-result-details">
+                            <div class="match-detail"><span>Location</span><strong>{% if match.user.location_visibility %}{{ match.user.location or 'Not shared' }}{% else %}Not shared{% endif %}</strong></div>
+                            <div class="match-detail"><span>Average rating</span><strong>{% if match.average_rating is not none %}★ {{ '%.1f'|format(match.average_rating) }}{% else %}Not rated yet{% endif %}</strong></div>
+                            <a class="match-profile-button" href="{{ url_for('user_profile', user_id=match.user.id) }}">View Profile <span aria-hidden="true">↗</span></a>
+                        </div>
+
+                        <div class="matched-skills-list">
+                            {% for skill in match.skills %}
+                                <div class="matched-skill-row">
+                                    <div class="matched-skill-name"><span class="matched-skill-mark" aria-hidden="true">↗</span><div><strong>{{ skill.name }}</strong><span>{{ skill.category or 'Other' }}</span></div></div>
+                                    <form class="request-skill-form" method="post" action="{{ url_for('create_skill_request') }}">
+                                        <input type="hidden" name="receiver_id" value="{{ match.user.id }}">
+                                        <input type="hidden" name="skill_id" value="{{ skill.id }}">
+                                        <label class="request-message-field"><span>Personal message</span><textarea name="message" rows="2" maxlength="1000" required placeholder="Say what you’d like to learn"></textarea></label>
+                                        <button class="button button-dark request-skill-button" type="submit">Request Skill <span aria-hidden="true">↗</span></button>
+                                    </form>
+                                </div>
+                            {% endfor %}
+                        </div>
+                    </article>
+                {% endfor %}
+            </div>
+        {% else %}
+            <section class="matches-empty" aria-labelledby="no-match-title">
+                <span aria-hidden="true">⌕</span><h2 id="no-match-title">No matches yet</h2>
+                <p>No members currently teach the skills in your learning list.</p>
+                <a class="button button-outline" href="{{ url_for('manage_skills') }}">Update my skills <span aria-hidden="true">↗</span></a>
+            </section>
+        {% endif %}
+    </main>
+    <script src="{{ url_for('static', filename='js/script.js') }}" defer></script>
+</body>
+</html>

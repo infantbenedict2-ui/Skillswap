@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Log in | SkillSwap</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header class="site-header">
+        <nav class="navbar shell" aria-label="Main navigation">
+            <a class="brand" href="{{ url_for('home') }}" aria-label="SkillSwap home">
+                <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+                <span>Skill<span class="brand-accent">Swap</span></span>
+            </a>
+            <a class="nav-link" href="{{ url_for('register') }}">Create account <span aria-hidden="true">↗</span></a>
+        </nav>
+    </header>
+    <main class="login-main shell">
+        <section class="login-panel" aria-labelledby="login-title">
+            <span class="login-symbol" aria-hidden="true">✳</span>
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    <div class="form-flashes" aria-live="polite">
+                        {% for category, message in messages %}
+                            <p class="flash-message flash-{{ category }}" role="{{ 'alert' if category == 'error' else 'status' }}">{{ message }}</p>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            {% endwith %}
+            <p class="eyebrow">Welcome to your next skill</p>
+            <h1 id="login-title">Welcome<br><em>back.</em></h1>
+            <p>Sign in to pick up where your next skill swap begins.</p>
+            <form class="login-form" method="post" action="{{ url_for('login') }}">
+                <label class="form-field" for="identifier">
+                    <span>Username or email</span>
+                    <input id="identifier" name="identifier" type="text" value="{{ request.form.get('identifier', '') }}" autocomplete="username" required>
+                </label>
+                <label class="form-field" for="login-password">
+                    <span>Password</span>
+                    <input id="login-password" name="password" type="password" autocomplete="current-password" required>
+                </label>
+                <button class="button button-dark login-submit" type="submit">Log in <span aria-hidden="true">↗</span></button>
+            </form>
+            <p class="login-register"><a href="{{ url_for('forgot_password') }}">Need help accessing your account?</a></p>
+            <p class="login-register">New to SkillSwap? <a href="{{ url_for('register') }}">Create an account <span aria-hidden="true">→</span></a></p>
+        </section>
+    </main>
+</body>
+</html>

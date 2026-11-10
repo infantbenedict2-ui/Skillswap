@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Explore {{ skill.name }} on SkillSwap.">
+    <title>{{ skill.name }} | SkillSwap</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header class="site-header"><nav class="navbar shell" aria-label="Main navigation"><a class="brand" href="{{ url_for('home') }}"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>Skill<span class="brand-accent">Swap</span></span></a><div class="profile-header-links"><a class="nav-link" href="{{ url_for('find_skills') }}">Find Skills</a>{% if current_user.is_authenticated %}<a class="nav-link" href="{{ url_for('dashboard') }}">Dashboard</a>{% else %}<a class="nav-link" href="{{ url_for('login') }}">Log in</a>{% endif %}</div></nav></header>
+    <main class="discovery-page shell">
+        <a class="profile-back-link" href="{{ url_for('find_skills') }}">← Back to search</a>
+        <section class="skill-detail-hero"><p class="eyebrow">{{ skill.category or 'Skill catalog' }}</p><h1>{{ skill.name }}</h1><p>{{ skill.description or 'Explore community members who list this as a skill they teach.' }}</p><span>{{ teachers|length }} active teacher listing{% if teachers|length != 1 %}s{% endif %}</span></section>
+        <section class="skill-teachers"><h2>Members who teach {{ skill.name }}</h2>
+            {% if teachers %}<div class="discovery-grid">{% for listing in teachers %}
+                <article class="discovery-card"><div class="discovery-card-top"><span class="discovery-skill-icon">{{ listing.user.name[:1]|upper }}</span><span class="discovery-category">@{{ listing.user.username }}</span></div><h3><a href="{{ url_for('user_profile', user_id=listing.user.id) }}">{{ listing.user.name }}</a></h3>{% if listing.user.location_visibility and listing.user.location %}<p class="discovery-location">⌖ {{ listing.user.location }}</p>{% endif %}<p>{{ listing.user.bio or 'This member is ready to share what they know.' }}</p><a class="button button-outline" href="{{ url_for('user_profile', user_id=listing.user.id) }}">View profile</a></article>
+            {% endfor %}</div>{% else %}<section class="discovery-empty"><h2>No teacher listings yet</h2><p>There are no active public listings for this skill right now.</p><a class="button button-outline" href="{{ url_for('find_skills') }}">Browse other skills</a></section>{% endif %}
+        </section>
+    </main>
+</body>
+</html>

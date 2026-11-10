@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Schedule and manage your SkillSwap sessions.">
+    <title>My Sessions | SkillSwap</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header class="site-header"><nav class="navbar shell" aria-label="Main navigation"><a class="brand" href="{{ url_for('home') }}"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>Skill<span class="brand-accent">Swap</span></span></a><div class="profile-header-links"><a class="nav-link" href="{{ url_for('dashboard') }}">Dashboard</a><a class="nav-link" href="{{ url_for('view_requests') }}">Requests</a></div></nav></header>
+    <main class="app-page shell" data-session-center data-current-user-id="{{ current_user.id }}" data-list-endpoint="{{ url_for('list_sessions') }}">
+        <header class="app-page-heading"><div><p class="eyebrow">Plan time to learn</p><h1>My sessions</h1><p>Schedule sessions from accepted requests and manage your shared learning time.</p></div></header>
+        <div class="app-feedback" data-feedback role="status" aria-live="polite"></div>
+        <section class="app-panel" aria-labelledby="create-session-title">
+            <div class="app-panel-heading"><div><p class="eyebrow">Accepted swap requests</p><h2 id="create-session-title">Schedule a session</h2></div></div>
+            {% if accepted_requests %}
+                <form class="api-form session-create-form" data-api-form data-endpoint="{{ url_for('create_session') }}" data-method="POST">
+                    <label for="session-request"><span>Accepted request</span><select id="session-request" name="skill_request_id" required><option value="">Choose a matched request</option>{% for item in accepted_requests %}<option value="{{ item.id }}" data-teacher="{{ item.receiver_id }}" data-learner="{{ item.sender_id }}">{{ item.skill.name }} · {{ item.sender.name }} ↔ {{ item.receiver.name }}</option>{% endfor %}</select></label>
+                    <label for="session-title"><span>Title</span><input id="session-title" name="title" type="text" maxlength="200" required></label>
+                    <label for="session-date"><span>Date</span><input id="session-date" name="date" type="date" required></label>
+                    <label for="session-start"><span>Start time</span><input id="session-start" name="start_time" type="time" required></label>
+                    <label for="session-end"><span>End time</span><input id="session-end" name="end_time" type="time" required></label>
+                    <label class="field-wide" for="session-notes"><span>Notes <small>Optional</small></span><textarea id="session-notes" name="notes" rows="3" maxlength="4000"></textarea></label>
+                    <button class="button button-dark" type="submit">Create session <span aria-hidden="true">↗</span></button>
+                </form>
+            {% else %}
+                <div class="app-empty"><h3>No accepted requests yet</h3><p>Sessions can only be scheduled with a participant in an accepted SkillSwap request.</p><a class="button button-outline" href="{{ url_for('view_requests') }}">Review requests</a></div>
+            {% endif %}
+        </section>
+        <section class="app-panel" aria-labelledby="sessions-list-title">
+            <div class="app-panel-heading"><div><p class="eyebrow">Your learning calendar</p><h2 id="sessions-list-title">Session list</h2></div>
+                <label class="session-filter-label" for="session-filter">Show <select id="session-filter" data-session-filter><option value="upcoming">Upcoming</option><option value="in_progress">In progress</option><option value="completed">Completed</option><option value="cancelled">Cancelled</option></select></label>
+            </div>
+            <div class="app-feedback" data-session-feedback role="status" aria-live="polite"></div>
+            <div class="session-list" data-session-list aria-live="polite"><p class="app-loading">Loading your sessions…</p></div>
+        </section>
+    </main>
+    <script src="{{ url_for('static', filename='js/script.js') }}" defer></script>
+</body>
+</html>
